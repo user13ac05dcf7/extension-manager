@@ -941,6 +941,9 @@ update_is_supported (ExmManager *self)
 
     self->is_supported = supported;
     g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_IS_SUPPORTED]);
+
+    if (supported)
+        update_extension_list (self);
 }
 
 static void
@@ -971,9 +974,6 @@ on_proxy_created (GObject      *source G_GNUC_UNUSED,
     g_object_bind_property (self->proxy, "user-extensions-enabled",
                             self, "extensions-enabled",
                             G_BINDING_BIDIRECTIONAL|G_BINDING_SYNC_CREATE);
-
-    if (self->is_supported)
-        update_extension_list (self);
 
     g_signal_connect (self->proxy,
                       "extension-state-changed",
