@@ -841,6 +841,7 @@ on_list_extensions_ready (GObject      *source,
     if (error != NULL)
     {
         notify_error (self, "Could not list extensions: %s\n", error->message);
+        g_clear_error (&error);
         g_object_unref (self);
         return;
     }
@@ -849,6 +850,7 @@ on_list_extensions_ready (GObject      *source,
     g_clear_object (&self->ext_model);
 
     parse_extension_list (exlist, &self->ext_model);
+    g_variant_unref (exlist);
 
     g_object_notify_by_pspec (G_OBJECT (self), properties [PROP_EXTENSIONS]);
 
