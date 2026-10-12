@@ -59,6 +59,7 @@ struct _ExmWindow
     AdwToastOverlay      *toast_overlay;
     AdwAlertDialog       *remove_dialog;
     AdwAlertDialog       *unsupported_dialog;
+    AdwAlertDialog       *logout_dialog;
     AdwAlertDialog       *select_remove_dialog;
 };
 
@@ -243,7 +244,7 @@ on_install_done (GObject      *source,
         state = EXM_INSTALL_BUTTON_STATE_UNSUPPORTED;
     }
 
-    if (!exm_manager_install_finish (source, res, &error))
+    if (!exm_manager_install_finish (EXM_MANAGER (source), res, &error))
     {
         // TODO: Properly log this
         if (error)
@@ -548,6 +549,30 @@ on_error (ExmManager *manager G_GNUC_UNUSED,
 }
 
 static void
+logout_dialog_response (AdwAlertDialog *dialog,
+                        GAsyncResult   *result,
+                        ExmWindow      *self)
+{
+    const char *response = adw_alert_dialog_choose_finish (dialog, result);
+
+    if (g_strcmp0 (response, "logout") == 0)
+        gtk_widget_activate_action (GTK_WIDGET (self), "app.logout", NULL);
+}
+
+static void
+on_logout_required (ExmManager  *manager G_GNUC_UNUSED,
+                    const gchar *uuid G_GNUC_UNUSED,
+                    ExmWindow   *self)
+{
+    // Already asking, after an earlier install
+    if (gtk_widget_get_mapped (GTK_WIDGET (self->logout_dialog)))
+        return;
+
+    adw_alert_dialog_choose (self->logout_dialog, GTK_WIDGET (self), NULL,
+                             (GAsyncReadyCallback) logout_dialog_response, self);
+}
+
+static void
 sync_visible_page (ExmWindow *self)
 {
     gboolean is_supported;
@@ -720,6 +745,7 @@ exm_window_constructed (GObject *object)
     G_OBJECT_CLASS (exm_window_parent_class)->constructed (object);
 
     g_signal_connect (self->manager, "error-occurred", G_CALLBACK (on_error), self);
+    g_signal_connect (self->manager, "logout-required", G_CALLBACK (on_logout_required), self);
     g_signal_connect_swapped (self->manager, "notify::is-supported",
                               G_CALLBACK (sync_visible_page), self);
     sync_visible_page (self);
@@ -777,6 +803,7 @@ exm_window_class_init (ExmWindowClass *klass)
     gtk_widget_class_bind_template_child (widget_class, ExmWindow, toast_overlay);
     gtk_widget_class_bind_template_child (widget_class, ExmWindow, remove_dialog);
     gtk_widget_class_bind_template_child (widget_class, ExmWindow, unsupported_dialog);
+    gtk_widget_class_bind_template_child (widget_class, ExmWindow, logout_dialog);
     gtk_widget_class_bind_template_child (widget_class, ExmWindow, select_remove_dialog);
 
     gtk_widget_class_bind_template_callback (widget_class, on_visible_page_changed);

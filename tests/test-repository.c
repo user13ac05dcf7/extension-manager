@@ -303,6 +303,73 @@ test_own_settings (void)
     g_unsetenv ("EXM_EXTENSION_REPOSITORY");
 }
 
+static const gchar *PACKAGES =
+    "{\"schema_version\":1,\"serial\":1,\"expires_at\":\"2026-10-20T20:00:00Z\","
+    "\"extensions\":["
+    " {\"uuid\":\"own@x\",\"name\":\"Own\",\"tier\":\"reviewed\",\"releases\":["
+    "  {\"version\":1,\"shell_versions\":[\"49\",\"50\"],\"size\":10,\"download\":\"downloads/one.zip\","
+    "   \"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},"
+    "  {\"version\":3,\"shell_versions\":[\"51\"],\"size\":30,\"download\":\"downloads/three.zip\","
+    "   \"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"},"
+    "  {\"version\":2,\"shell_versions\":[\"50.1\"],\"size\":20,\"download\":\"downloads/two.zip\","
+    "   \"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"}]},"
+    " {\"uuid\":\"bad@x\",\"tier\":\"reviewed\",\"releases\":["
+    "  {\"version\":1,\"shell_versions\":[\"50\"],\"size\":10,\"download\":\"http://example.com/a.zip\","
+    "   \"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},"
+    "  {\"version\":2,\"shell_versions\":[\"51\"],\"size\":10,\"download\":\"a.zip\",\"sha256\":\"11\"}]},"
+    " {\"uuid\":\"dock@x\",\"tier\":\"reviewed\",\"releases\":[]},"
+    " {\"uuid\":\"dock@x\",\"tier\":\"ego-mirror\",\"releases\":[]}"
+    "]}";
+
+static void
+test_packages (void)
+{
+    g_autoptr (JsonNode) index = parse (PACKAGES);
+    JsonObject *object = json_node_get_object (index);
+    JsonObject *extension;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *sha256 = NULL;
+    GError *error = NULL;
+    gint64 size = 0;
+
+    extension = exm_repository_find_package (object, "own@x", &error);
+    g_assert_no_error (error);
+
+    // The newest release for the running major version
+    g_assert_true (exm_repository_get_download (extension, "https://registry.example/v1/index.json", "50.2",
+                                                &url, &sha256, &size, &error));
+    g_assert_no_error (error);
+    g_assert_cmpstr (url, ==, "https://registry.example/v1/downloads/two.zip");
+    g_assert_cmpstr (sha256, ==, "2222222222222222222222222222222222222222222222222222222222222222");
+    g_assert_cmpint (size, ==, 20);
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&sha256, g_free);
+
+    g_assert_false (exm_repository_get_download (extension, "https://registry.example/index.json", "48.0",
+                                                 &url, &sha256, &size, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+    g_clear_error (&error);
+
+    // Downloads must be HTTPS, with a well-formed checksum
+    extension = exm_repository_find_package (object, "bad@x", NULL);
+    g_assert_false (exm_repository_get_download (extension, "https://registry.example/index.json", "50",
+                                                 &url, &sha256, &size, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    g_assert_false (exm_repository_get_download (extension, "https://registry.example/index.json", "51",
+                                                 &url, &sha256, &size, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+    g_clear_error (&error);
+
+    // A mirrored entry is never replaced by another tier's package
+    extension = exm_repository_find_package (object, "dock@x", NULL);
+    g_assert_cmpstr (json_object_get_string_member (extension, "tier"), ==, "ego-mirror");
+
+    g_assert_null (exm_repository_find_package (object, "none@x", &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+    g_clear_error (&error);
+}
+
 static void
 test_routing (void)
 {
@@ -343,6 +410,7 @@ main (int argc, char *argv[])
     g_test_add_func ("/repository/source-checks", test_source_checks);
     g_test_add_func ("/repository/routing", test_routing);
     g_test_add_func ("/repository/own-settings", test_own_settings);
+    g_test_add_func ("/repository/packages", test_packages);
 
     return g_test_run ();
 }

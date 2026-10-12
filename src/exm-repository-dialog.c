@@ -99,7 +99,7 @@ load_repository (ExmRepositoryDialog *self)
     }
 
     adw_preferences_group_set_description (self->group,
-                                           _("Extension Manager shows extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below."));
+                                           _("Extension Manager shows extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below. Extensions reviewed by extensions.gnome.org are installed from there by GNOME Shell; others start after you log out and log back in."));
     gtk_widget_set_visible (GTK_WIDGET (self->restore_button), TRUE);
 
     if (origin == EXM_REPOSITORY_ORIGIN_ENVIRONMENT)

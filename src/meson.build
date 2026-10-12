@@ -54,6 +54,7 @@ exm_deps = [
   dependency('glycin-2'),
   dependency('glycin-gtk4-2'),
   dependency('gnutls'),
+  dependency('libarchive'),
 ]
 
 if libbacktrace_dep.found()

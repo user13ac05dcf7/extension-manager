@@ -52,7 +52,7 @@ void          exm_manager_install_async     (ExmManager           *self,
                                              GCancellable         *cancellable,
                                              GAsyncReadyCallback   callback,
                                              gpointer              user_data);
-gboolean      exm_manager_install_finish    (GObject              *self,
+gboolean      exm_manager_install_finish    (ExmManager           *self,
                                              GAsyncResult         *result,
                                              GError              **error);
 ExmRepositoryOrigin

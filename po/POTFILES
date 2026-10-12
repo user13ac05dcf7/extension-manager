@@ -48,6 +48,7 @@ src/exm-window.c
 src/exm-zoom-picture.c
 src/local/exm-extension.c
 src/local/exm-manager.c
+src/local/exm-package.c
 src/local/shell-dbus-interface.c
 src/main.c
 src/web/exm-comment-provider.c

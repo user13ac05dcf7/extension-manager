@@ -29,8 +29,13 @@
  * verifies against that key, it has not expired, and its serial is not lower
  * than one seen before. Requests for the extensions.gnome.org API are then
  * answered from the index in the same JSON shape, so the rest of the
- * application stays unchanged. GNOME Shell itself downloads and checks the
- * packages on install and update.
+ * application stays unchanged.
+ *
+ * A Shell with its own repository downloads and checks the packages on install
+ * and update. On any other Shell, releases mirrored from extensions.gnome.org
+ * are installed by the Shell from there, and the others are downloaded by
+ * Extension Manager (see exm-package.c) and checked against the size and
+ * SHA-256 that the signed index gives.
  */
 
 #include "exm-repository.h"
@@ -45,6 +50,7 @@
 #define EGO_COMMENTS "https://extensions.gnome.org/comments/"
 
 #define MAX_INDEX_SIZE (32 * 1024 * 1024)
+#define MAX_PACKAGE_SIZE (16 * 1024 * 1024)
 #define INDEX_REFRESH_SECONDS (10 * 60)
 
 struct _ExmRepository
@@ -529,22 +535,173 @@ compare_names (gconstpointer a,
     return g_utf8_collate (first_name, second_name);
 }
 
+static gboolean
+is_mirrored (JsonObject *extension)
+{
+    return g_strcmp0 (member_string (extension, "tier"), "ego-mirror") == 0;
+}
+
+/*
+ * When an extension is listed both as mirrored from extensions.gnome.org and
+ * in another tier, only the mirrored entry is used, so a package from the
+ * repository can never take the place of the reviewed one.
+ */
 static JsonObject *
 find_extension (JsonObject  *index,
                 const gchar *uuid)
 {
     JsonArray *extensions = member_array (index, "extensions");
+    JsonObject *found = NULL;
 
     for (guint i = 0; i < json_array_get_length (extensions); i++)
     {
         JsonNode *node = json_array_get_element (extensions, i);
+        JsonObject *extension;
 
-        if (JSON_NODE_HOLDS_OBJECT (node) &&
-            g_strcmp0 (member_string (json_node_get_object (node), "uuid"), uuid) == 0)
-            return json_node_get_object (node);
+        if (!JSON_NODE_HOLDS_OBJECT (node))
+            continue;
+
+        extension = json_node_get_object (node);
+        if (g_strcmp0 (member_string (extension, "uuid"), uuid) != 0)
+            continue;
+
+        if (is_mirrored (extension))
+            return extension;
+
+        if (found == NULL)
+            found = extension;
     }
 
-    return NULL;
+    return found;
+}
+
+/**
+ * exm_repository_find_package:
+ * @index: a verified index
+ * @uuid: the extension to install
+ *
+ * Returns: (transfer none): the entry to install @uuid from
+ */
+JsonObject *
+exm_repository_find_package (JsonObject   *index,
+                             const gchar  *uuid,
+                             GError      **error)
+{
+    JsonObject *extension = find_extension (index, uuid);
+
+    if (extension == NULL)
+    {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                     _("%s is not in the extension repository"), uuid);
+        return NULL;
+    }
+
+    return extension;
+}
+
+/**
+ * exm_repository_is_shell_compatible:
+ * @versions: (nullable): shell versions as strings, e.g. ["49", "50"]
+ * @shell_version: the running GNOME Shell version, e.g. "50.1"
+ *
+ * Only the major version counts, as for GNOME Shell itself.
+ */
+gboolean
+exm_repository_is_shell_compatible (JsonArray   *versions,
+                                    const gchar *shell_version)
+{
+    gint64 major = shell_version ? g_ascii_strtoll (shell_version, NULL, 10) : 0;
+
+    if (major <= 0)
+        return FALSE;
+
+    for (guint i = 0; versions != NULL && i < json_array_get_length (versions); i++)
+    {
+        JsonNode *node = json_array_get_element (versions, i);
+
+        if (JSON_NODE_HOLDS_VALUE (node) &&
+            json_node_get_value_type (node) == G_TYPE_STRING &&
+            g_ascii_strtoll (json_node_get_string (node), NULL, 10) == major)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+/**
+ * exm_repository_get_download:
+ * @extension: an entry of a verified index
+ * @index_url: the URL of that index; downloads are relative to it
+ * @shell_version: the running GNOME Shell version
+ * @url: (out): where to download the package
+ * @sha256: (out): its SHA-256, in lowercase hexadecimal
+ * @size: (out): its size in bytes
+ *
+ * Picks the newest release that supports @shell_version.
+ */
+gboolean
+exm_repository_get_download (JsonObject   *extension,
+                             const gchar  *index_url,
+                             const gchar  *shell_version,
+                             gchar       **url,
+                             gchar       **sha256,
+                             gint64       *size,
+                             GError      **error)
+{
+    JsonArray *releases = member_array (extension, "releases");
+    const gchar *uuid = member_string (extension, "uuid");
+    JsonObject *best = NULL;
+    const gchar *download, *digest;
+    g_autofree gchar *resolved = NULL;
+
+    for (guint i = 0; releases != NULL && i < json_array_get_length (releases); i++)
+    {
+        JsonNode *node = json_array_get_element (releases, i);
+        JsonObject *release;
+
+        if (!JSON_NODE_HOLDS_OBJECT (node))
+            continue;
+
+        release = json_node_get_object (node);
+        if (!member_is_int (release, "version") ||
+            !exm_repository_is_shell_compatible (member_array (release, "shell_versions"), shell_version))
+            continue;
+
+        if (best == NULL ||
+            json_object_get_int_member (release, "version") > json_object_get_int_member (best, "version"))
+            best = release;
+    }
+
+    if (best == NULL)
+    {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     _("%s has no release for GNOME Shell %s"), uuid, shell_version);
+        return FALSE;
+    }
+
+    download = member_string (best, "download");
+    digest = member_string (best, "sha256");
+
+    if (download == NULL || digest == NULL ||
+        strlen (digest) != 64 || strspn (digest, "0123456789abcdefABCDEF") != 64 ||
+        !member_is_int (best, "size") ||
+        json_object_get_int_member (best, "size") <= 0 ||
+        json_object_get_int_member (best, "size") > MAX_PACKAGE_SIZE)
+    {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     _("The extension repository has no usable download for %s"), uuid);
+        return FALSE;
+    }
+
+    resolved = g_uri_resolve_relative (index_url, download, G_URI_FLAGS_NONE, error);
+    if (resolved == NULL || !exm_repository_check_url (resolved, error))
+        return FALSE;
+
+    *url = g_steal_pointer (&resolved);
+    *sha256 = g_ascii_strdown (digest, -1);
+    *size = json_object_get_int_member (best, "size");
+
+    return TRUE;
 }
 
 static void
@@ -857,13 +1014,56 @@ fetch_data_free (FetchData *data)
     g_free (data);
 }
 
+typedef struct
+{
+    JsonNode *extension;
+    gchar *index_url;
+} Lookup;
+
+static void
+lookup_free (Lookup *lookup)
+{
+    g_clear_pointer (&lookup->extension, json_node_unref);
+    g_free (lookup->index_url);
+    g_free (lookup);
+}
+
+static void
+answer_lookup (ExmRepository *self,
+               GTask         *task)
+{
+    GError *error = NULL;
+    JsonObject *extension = exm_repository_find_package (json_node_get_object (self->index),
+                                                         g_task_get_task_data (task), &error);
+    Lookup *lookup;
+
+    if (extension == NULL)
+    {
+        g_task_return_error (task, error);
+        return;
+    }
+
+    lookup = g_new0 (Lookup, 1);
+    lookup->extension = json_node_init_object (json_node_alloc (), extension);
+    lookup->index_url = g_strdup (self->url);
+    g_task_return_pointer (task, lookup, (GDestroyNotify) lookup_free);
+}
+
 static void
 answer_task (ExmRepository *self,
              GTask         *task)
 {
     GError *error = NULL;
-    GBytes *bytes = exm_repository_answer (json_node_get_object (self->index),
-                                           g_task_get_task_data (task), &error);
+    GBytes *bytes;
+
+    if (g_task_get_source_tag (task) == exm_repository_lookup_async)
+    {
+        answer_lookup (self, task);
+        return;
+    }
+
+    bytes = exm_repository_answer (json_node_get_object (self->index),
+                                   g_task_get_task_data (task), &error);
 
     if (bytes == NULL)
         g_task_return_error (task, error);
@@ -1034,17 +1234,10 @@ start_fetch (ExmRepository *self)
                                       (GAsyncReadyCallback) on_index, data);
 }
 
-void
-exm_repository_request_async (ExmRepository       *self,
-                              const gchar         *ego_url,
-                              GCancellable        *cancellable,
-                              GAsyncReadyCallback  callback,
-                              gpointer             user_data)
+static void
+queue_task (ExmRepository *self,
+            GTask         *task)
 {
-    GTask *task = g_task_new (self, cancellable, callback, user_data);
-
-    g_task_set_task_data (task, g_strdup (ego_url), g_free);
-
     if (self->index != NULL &&
         g_get_monotonic_time () - self->fetched_at < INDEX_REFRESH_SECONDS * G_USEC_PER_SEC)
     {
@@ -1059,6 +1252,19 @@ exm_repository_request_async (ExmRepository       *self,
         start_fetch (self);
 }
 
+void
+exm_repository_request_async (ExmRepository       *self,
+                              const gchar         *ego_url,
+                              GCancellable        *cancellable,
+                              GAsyncReadyCallback  callback,
+                              gpointer             user_data)
+{
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+
+    g_task_set_task_data (task, g_strdup (ego_url), g_free);
+    queue_task (self, task);
+}
+
 GBytes *
 exm_repository_request_finish (ExmRepository  *self,
                                GAsyncResult   *result,
@@ -1067,6 +1273,55 @@ exm_repository_request_finish (ExmRepository  *self,
     g_return_val_if_fail (g_task_is_valid (result, self), NULL);
 
     return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+/**
+ * exm_repository_lookup_async:
+ * @uuid: the extension to install
+ *
+ * Finds the entry to install @uuid from in the verified index.
+ */
+void
+exm_repository_lookup_async (ExmRepository       *self,
+                             const gchar         *uuid,
+                             GCancellable        *cancellable,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data)
+{
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+
+    g_task_set_source_tag (task, exm_repository_lookup_async);
+    g_task_set_task_data (task, g_strdup (uuid), g_free);
+    queue_task (self, task);
+}
+
+/**
+ * exm_repository_lookup_finish:
+ * @index_url: (out) (optional): the URL of the index the entry is from
+ *
+ * Returns: (transfer full): the extension's entry in the index
+ */
+JsonNode *
+exm_repository_lookup_finish (ExmRepository  *self,
+                              GAsyncResult   *result,
+                              gchar         **index_url,
+                              GError        **error)
+{
+    Lookup *lookup;
+    JsonNode *extension;
+
+    g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+
+    lookup = g_task_propagate_pointer (G_TASK (result), error);
+    if (lookup == NULL)
+        return NULL;
+
+    extension = g_steal_pointer (&lookup->extension);
+    if (index_url)
+        *index_url = g_steal_pointer (&lookup->index_url);
+    lookup_free (lookup);
+
+    return extension;
 }
 
 static void

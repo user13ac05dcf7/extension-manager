@@ -22,6 +22,7 @@
 #include "exm-manager.h"
 
 #include "exm-config.h"
+#include "exm-package.h"
 #include "shell-dbus-interface.h"
 
 #include "../exm-types.h"
@@ -63,6 +64,7 @@ enum {
     SIGNAL_UPDATES_AVAILABLE,
     SIGNAL_ERROR_OCCURRED,
     SIGNAL_INSTALL_STATUS,
+    SIGNAL_LOGOUT_REQUIRED,
     N_SIGNALS
 };
 
@@ -363,6 +365,129 @@ exm_manager_is_installed_uuid (ExmManager  *self,
     return FALSE;
 }
 
+static void
+on_remote_installed (ShellExtensions *proxy,
+                     GAsyncResult    *res,
+                     GTask           *task)
+{
+    g_autofree gchar *out_result = NULL;
+    GError *error = NULL;
+
+    if (!shell_extensions_call_install_remote_extension_finish (proxy, &out_result, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, g_strcmp0 (out_result, "cancelled") != 0);
+
+    g_object_unref (task);
+}
+
+static void
+install_remote (ExmManager *self,
+                GTask      *task)
+{
+    shell_extensions_call_install_remote_extension (self->proxy,
+                                                    g_task_get_task_data (task),
+                                                    g_task_get_cancellable (task),
+                                                    (GAsyncReadyCallback) on_remote_installed,
+                                                    task);
+}
+
+static void
+on_package_installed (GObject      *source G_GNUC_UNUSED,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    ExmManager *self = g_task_get_source_object (task);
+    const gchar *uuid = g_task_get_task_data (task);
+    g_autoptr (GSettings) shell_settings = NULL;
+    GError *error = NULL;
+    gboolean staged;
+
+    if (!exm_package_install_finish (res, &staged, &error))
+    {
+        notify_error (self, "Could not install extension '%s': %s\n", uuid, error->message);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    // An update replaces the installed version at login and stays enabled
+    if (!staged)
+    {
+        shell_settings = exm_package_get_shell_settings (&error);
+
+        if (shell_settings == NULL || !exm_package_enable (shell_settings, uuid, &error))
+        {
+            notify_error (self, "Extension '%s' is installed, but could not be enabled: %s\n",
+                          uuid, error->message);
+            g_clear_error (&error);
+        }
+    }
+
+    g_signal_emit (self, signals [SIGNAL_LOGOUT_REQUIRED], 0, uuid);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+on_package_found (ExmRepository *repository,
+                  GAsyncResult  *res,
+                  GTask         *task)
+{
+    ExmManager *self = g_task_get_source_object (task);
+    const gchar *uuid = g_task_get_task_data (task);
+    g_autoptr (JsonNode) entry = NULL;
+    g_autofree gchar *index_url = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *sha256 = NULL;
+    g_autofree gchar *shell_dir = NULL;
+    JsonObject *extension;
+    const gchar *tier;
+    GError *error = NULL;
+    gint64 size;
+
+    entry = exm_repository_lookup_finish (repository, res, &index_url, &error);
+    if (entry == NULL)
+        goto failed;
+
+    extension = json_node_get_object (entry);
+    tier = json_object_get_string_member_with_default (extension, "tier", NULL);
+
+    // Mirrored releases are the ones on extensions.gnome.org, which the Shell
+    // installs, loads at once and keeps updated
+    if (g_strcmp0 (tier, "ego-mirror") == 0)
+    {
+        install_remote (self, task);
+        return;
+    }
+
+    if (!exm_repository_get_download (extension, index_url, self->shell_version,
+                                      &url, &sha256, &size, &error))
+        goto failed;
+
+    shell_dir = exm_package_get_shell_dir ();
+    exm_package_install_async (uuid, url, sha256, size, self->shell_version, shell_dir,
+                               g_task_get_cancellable (task),
+                               (GAsyncReadyCallback) on_package_installed, task);
+    return;
+
+failed:
+    notify_error (self, "Could not install extension '%s': %s\n", uuid, error->message);
+    g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+/**
+ * exm_manager_install_async:
+ * @uuid: the extension to install
+ *
+ * GNOME Shell installs from its own repository, or from
+ * extensions.gnome.org. With a repository of Extension Manager's own,
+ * releases it mirrors from extensions.gnome.org are still installed by the
+ * Shell; the others are installed by Extension Manager and start after the
+ * next login, which "logout-required" announces.
+ */
 void
 exm_manager_install_async (ExmManager          *self,
                            const gchar         *uuid,
@@ -370,34 +495,35 @@ exm_manager_install_async (ExmManager          *self,
                            GAsyncReadyCallback  callback,
                            gpointer             user_data)
 {
-    shell_extensions_call_install_remote_extension (self->proxy,
-                                                    uuid,
-                                                    cancellable,
-                                                    callback,
-                                                    user_data);
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+    ExmRepository *repository = exm_repository_get_default ();
+
+    g_task_set_task_data (task, g_strdup (uuid), g_free);
+
+    if (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL &&
+        exm_repository_is_enabled (repository))
+    {
+        exm_repository_lookup_async (repository, uuid, cancellable,
+                                     (GAsyncReadyCallback) on_package_found, task);
+        return;
+    }
+
+    install_remote (self, task);
 }
 
+/**
+ * exm_manager_install_finish:
+ *
+ * Returns: %TRUE if installed, %FALSE if it failed or the user cancelled
+ */
 gboolean
-exm_manager_install_finish (GObject       *self,
+exm_manager_install_finish (ExmManager    *self,
                             GAsyncResult  *result,
                             GError       **error)
 {
-    gchar *out_result = NULL;
-    gboolean success;
+    g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
 
-    g_return_val_if_fail (SHELL_IS_EXTENSIONS (self), FALSE);
-
-    success = shell_extensions_call_install_remote_extension_finish (SHELL_EXTENSIONS (self),
-                                                                     &out_result,
-                                                                     result,
-                                                                     error);
-
-    if (g_strcmp0 (out_result, "cancelled") == 0)
-        success = FALSE;
-
-    g_free (out_result);
-
-    return success;
+    return g_task_propagate_boolean (G_TASK (result), error);
 }
 
 static int
@@ -537,6 +663,16 @@ exm_manager_class_init (ExmManagerClass *klass)
                         0, NULL, NULL, NULL,
                         G_TYPE_NONE, 1,
                         EXM_TYPE_INSTALL_BUTTON_STATE);
+
+    /* An extension was installed or updated that GNOME Shell only starts
+     * after the user logs out and back in */
+    signals [SIGNAL_LOGOUT_REQUIRED]
+        = g_signal_new ("logout-required",
+                        G_TYPE_FROM_CLASS (object_class),
+                        G_SIGNAL_RUN_LAST|G_SIGNAL_NO_RECURSE|G_SIGNAL_NO_HOOKS,
+                        0, NULL, NULL, NULL,
+                        G_TYPE_NONE, 1,
+                        G_TYPE_STRING);
 }
 
 static void
@@ -853,7 +989,7 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
  * what the Shell installs. A Shell without these properties installs from
  * extensions.gnome.org; the repository then comes from the application's
  * own settings (or EXM_EXTENSION_REPOSITORY and EXM_EXTENSION_REPOSITORY_KEY,
- * for testing).
+ * for testing), and Extension Manager installs what the Shell cannot.
  */
 #define REPOSITORY_PROPERTY "ExtensionRepository"
 #define REPOSITORY_KEY_PROPERTY "ExtensionRepositoryKey"
