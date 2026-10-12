@@ -843,24 +843,181 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
 
 /*
  * GNOME Shell installs and updates from the catalogue in its
- * extension-repository setting. Browse it too, so what is shown is what the
- * Shell will install. A Shell without the ExtensionRepository property uses
- * extensions.gnome.org; EXM_EXTENSION_REPOSITORY then sets one for testing.
+ * extension-repository settings and exposes them as the ExtensionRepository
+ * and ExtensionRepositoryKey properties. Browse the same catalogue, so what
+ * is shown is what the Shell installs. A Shell without these properties uses
+ * extensions.gnome.org; EXM_EXTENSION_REPOSITORY and
+ * EXM_EXTENSION_REPOSITORY_KEY then set a repository for testing.
  */
+#define REPOSITORY_PROPERTY "ExtensionRepository"
+#define REPOSITORY_KEY_PROPERTY "ExtensionRepositoryKey"
+
+static gchar *
+get_string_property (ExmManager  *self,
+                     const gchar *name)
+{
+    g_autoptr (GVariant) value = NULL;
+
+    value = g_dbus_proxy_get_cached_property (G_DBUS_PROXY (self->proxy), name);
+
+    if (value == NULL || !g_variant_is_of_type (value, G_VARIANT_TYPE_STRING))
+        return NULL;
+
+    return g_variant_dup_string (value, NULL);
+}
+
+/**
+ * exm_manager_get_repository:
+ * @url: (out) (optional): the repository the Shell uses, empty for
+ *   extensions.gnome.org
+ * @public_key: (out) (optional): the key that signs its index
+ *
+ * Returns: whether the Shell supports extension repositories
+ */
+gboolean
+exm_manager_get_repository (ExmManager  *self,
+                            gchar      **url,
+                            gchar      **public_key)
+{
+    g_autofree gchar *shell_url = get_string_property (self, REPOSITORY_PROPERTY);
+    g_autofree gchar *shell_key = get_string_property (self, REPOSITORY_KEY_PROPERTY);
+    gboolean supported = shell_url != NULL && shell_key != NULL;
+
+    if (url)
+        *url = g_strdup (supported ? shell_url : "");
+    if (public_key)
+        *public_key = g_strdup (supported ? shell_key : "");
+
+    return supported;
+}
+
 static void
 update_repository (ExmManager *self)
 {
-    g_autoptr (GVariant) value = NULL;
-    const gchar *url;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *key = NULL;
 
-    value = g_dbus_proxy_get_cached_property (G_DBUS_PROXY (self->proxy), "ExtensionRepository");
-
-    if (value != NULL && g_variant_is_of_type (value, G_VARIANT_TYPE_STRING))
-        url = g_variant_get_string (value, NULL);
+    if (exm_manager_get_repository (self, &url, &key))
+        exm_repository_set_source (exm_repository_get_default (), url, key);
     else
-        url = g_getenv ("EXM_EXTENSION_REPOSITORY");
+        exm_repository_set_source (exm_repository_get_default (),
+                                   g_getenv ("EXM_EXTENSION_REPOSITORY"),
+                                   g_getenv ("EXM_EXTENSION_REPOSITORY_KEY"));
+}
 
-    exm_repository_set_url (exm_repository_get_default (), url);
+typedef struct
+{
+    gchar *names[2];
+    gchar *values[2];
+    guint next;
+} SetRepositoryData;
+
+static void
+set_repository_data_free (SetRepositoryData *data)
+{
+    for (guint i = 0; i < G_N_ELEMENTS (data->names); i++)
+    {
+        g_free (data->names[i]);
+        g_free (data->values[i]);
+    }
+
+    g_free (data);
+}
+
+static void set_next_repository_property (GTask *task);
+
+static void
+on_repository_property_set (GDBusConnection *connection,
+                            GAsyncResult    *res,
+                            GTask           *task)
+{
+    g_autoptr (GVariant) reply = NULL;
+    GError *error = NULL;
+
+    reply = g_dbus_connection_call_finish (connection, res, &error);
+
+    if (reply == NULL)
+    {
+        g_dbus_error_strip_remote_error (error);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    set_next_repository_property (task);
+}
+
+static void
+set_next_repository_property (GTask *task)
+{
+    ExmManager *self = g_task_get_source_object (task);
+    SetRepositoryData *data = g_task_get_task_data (task);
+    GDBusProxy *proxy = G_DBUS_PROXY (self->proxy);
+    guint i = data->next++;
+
+    if (i == G_N_ELEMENTS (data->names))
+    {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    g_dbus_connection_call (g_dbus_proxy_get_connection (proxy),
+                            g_dbus_proxy_get_name (proxy),
+                            g_dbus_proxy_get_object_path (proxy),
+                            "org.freedesktop.DBus.Properties",
+                            "Set",
+                            g_variant_new ("(ssv)",
+                                           g_dbus_proxy_get_interface_name (proxy),
+                                           data->names[i],
+                                           g_variant_new_string (data->values[i])),
+                            NULL,
+                            G_DBUS_CALL_FLAGS_NONE,
+                            -1,
+                            g_task_get_cancellable (task),
+                            (GAsyncReadyCallback) on_repository_property_set,
+                            task);
+}
+
+/**
+ * exm_manager_set_repository_async:
+ * @url: the index URL, or "" for extensions.gnome.org
+ * @public_key: the key that signs the index, or ""
+ *
+ * Sets the repository the Shell installs and updates from. The Shell needs a
+ * key whenever a URL is set, so the key is written first when setting a
+ * repository and last when clearing it.
+ */
+void
+exm_manager_set_repository_async (ExmManager          *self,
+                                  const gchar         *url,
+                                  const gchar         *public_key,
+                                  GCancellable        *cancellable,
+                                  GAsyncReadyCallback  callback,
+                                  gpointer             user_data)
+{
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+    SetRepositoryData *data = g_new0 (SetRepositoryData, 1);
+    gboolean clearing = url == NULL || *url == '\0';
+    guint url_index = clearing ? 0 : 1;
+
+    data->names[url_index] = g_strdup (REPOSITORY_PROPERTY);
+    data->values[url_index] = g_strdup (url ? url : "");
+    data->names[1 - url_index] = g_strdup (REPOSITORY_KEY_PROPERTY);
+    data->values[1 - url_index] = g_strdup (public_key ? public_key : "");
+    g_task_set_task_data (task, data, (GDestroyNotify) set_repository_data_free);
+
+    set_next_repository_property (task);
+}
+
+gboolean
+exm_manager_set_repository_finish (ExmManager    *self,
+                                   GAsyncResult  *result,
+                                   GError       **error)
+{
+    g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
+
+    return g_task_propagate_boolean (G_TASK (result), error);
 }
 
 static void

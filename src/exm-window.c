@@ -31,6 +31,7 @@
 #include "exm-screenshot-view.h"
 #include "exm-types.h"
 #include "exm-upgrade-assistant.h"
+#include "exm-repository-dialog.h"
 #include "local/exm-extension.h"
 #include "local/exm-manager.h"
 
@@ -442,6 +443,17 @@ show_upgrade_assistant (GtkWidget  *widget,
 }
 
 static void
+show_repository_dialog (GtkWidget  *widget,
+                        const char *action_name G_GNUC_UNUSED,
+                        GVariant   *param G_GNUC_UNUSED)
+{
+    ExmWindow *self = EXM_WINDOW (widget);
+
+    ExmRepositoryDialog *dialog = exm_repository_dialog_new (self->manager);
+    adw_dialog_present (ADW_DIALOG (dialog), widget);
+}
+
+static void
 show_error_dialog (GtkWidget  *widget,
                    const char *action_name G_GNUC_UNUSED,
                    GVariant   *param)
@@ -786,6 +798,7 @@ exm_window_class_init (ExmWindowClass *klass)
     gtk_widget_class_install_action (widget_class, "win.show-main", NULL, show_view);
     gtk_widget_class_install_action (widget_class, "win.show-screenshot", NULL, show_view);
     gtk_widget_class_install_action (widget_class, "win.show-upgrade-assistant", NULL, show_upgrade_assistant);
+    gtk_widget_class_install_action (widget_class, "win.show-repository-dialog", NULL, show_repository_dialog);
     gtk_widget_class_install_action (widget_class, "win.show-page", "s", show_page);
     gtk_widget_class_install_action (widget_class, "win.show-error", "s", show_error);
     gtk_widget_class_install_action (widget_class, "win.show-error-dialog", "s", show_error_dialog);

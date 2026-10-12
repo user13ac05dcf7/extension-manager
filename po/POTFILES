@@ -27,6 +27,8 @@ src/exm-installed-page.blp
 src/exm-installed-page.c
 src/exm-rating.blp
 src/exm-rating.c
+src/exm-repository-dialog.blp
+src/exm-repository-dialog.c
 src/exm-screenshot-view.blp
 src/exm-screenshot-view.c
 src/exm-screenshot.blp
@@ -52,6 +54,7 @@ src/web/exm-comment-provider.c
 src/web/exm-data-provider.c
 src/web/exm-image-resolver.c
 src/web/exm-profile-provider.c
+src/web/exm-repository.c
 src/web/exm-request-handler.c
 src/web/exm-search-provider.c
 src/web/exm-versions-provider.c

@@ -188,23 +188,55 @@ test_unavailable (void)
 }
 
 static void
+test_source_checks (void)
+{
+    GError *error = NULL;
+
+    g_assert_true (exm_repository_check_url ("https://registry.example/index.json", NULL));
+    g_assert_true (exm_repository_check_url ("http://127.0.0.1:8765/index.json", NULL));
+    g_assert_true (exm_repository_check_url ("http://[::1]/index.json", NULL));
+
+    g_assert_false (exm_repository_check_url ("http://example.com/index.json", &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    g_assert_false (exm_repository_check_url ("not a url", NULL));
+    g_assert_false (exm_repository_check_url ("file:///etc/passwd", NULL));
+    g_assert_false (exm_repository_check_url ("https:///index.json", NULL));
+
+    g_assert_true (exm_repository_check_key (TEST_KEY, NULL));
+    g_assert_false (exm_repository_check_key ("", &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    // 64 bytes: a signature, not a key
+    g_assert_false (exm_repository_check_key (SIGNATURE, NULL));
+    g_assert_false (exm_repository_check_key ("YFE8ykXr/yYORPmP97MV/8VteVwEkDe9FKDEewtcHn!=", NULL));
+    g_assert_false (exm_repository_check_key (NULL, NULL));
+}
+
+static void
 test_routing (void)
 {
     ExmRepository *repository = exm_repository_get_default ();
 
     g_assert_false (exm_repository_handles (repository, "https://extensions.gnome.org/api/v1/extensions/"));
 
-    g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*does not use HTTPS*");
-    exm_repository_set_url (repository, "http://example.com/index.json");
+    g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*must be an HTTPS address*");
+    exm_repository_set_source (repository, "http://example.com/index.json", TEST_KEY);
     g_test_assert_expected_messages ();
     g_assert_false (exm_repository_is_enabled (repository));
 
-    exm_repository_set_url (repository, "https://registry.example/index.json");
+    // A repository without a usable key is refused
+    g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*base64 Ed25519 key*");
+    exm_repository_set_source (repository, "https://registry.example/index.json", "");
+    g_test_assert_expected_messages ();
+    g_assert_false (exm_repository_is_enabled (repository));
+
+    exm_repository_set_source (repository, "https://registry.example/index.json", TEST_KEY);
     g_assert_true (exm_repository_handles (repository, "https://extensions.gnome.org/api/v1/extensions/"));
     g_assert_true (exm_repository_handles (repository, "https://extensions.gnome.org/comments/all/?pk=1"));
     g_assert_false (exm_repository_handles (repository, "https://extensions.gnome.org/extension-data/icons/a.png"));
 
-    exm_repository_set_url (repository, "");
+    exm_repository_set_source (repository, "", "");
     g_assert_false (exm_repository_is_enabled (repository));
 }
 
@@ -218,6 +250,7 @@ main (int argc, char *argv[])
     g_test_add_func ("/repository/browse-and-search", test_browse_and_search);
     g_test_add_func ("/repository/detail-and-versions", test_detail_and_versions);
     g_test_add_func ("/repository/unavailable", test_unavailable);
+    g_test_add_func ("/repository/source-checks", test_source_checks);
     g_test_add_func ("/repository/routing", test_routing);
 
     return g_test_run ();

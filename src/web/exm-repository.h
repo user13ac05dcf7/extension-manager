@@ -33,8 +33,17 @@ G_DECLARE_FINAL_TYPE (ExmRepository, exm_repository, EXM, REPOSITORY, GObject)
 ExmRepository *exm_repository_get_default (void);
 
 void
-exm_repository_set_url (ExmRepository *self,
-                        const gchar   *url);
+exm_repository_set_source (ExmRepository *self,
+                           const gchar   *url,
+                           const gchar   *public_key);
+
+gboolean
+exm_repository_check_url (const gchar  *url,
+                          GError      **error);
+
+gboolean
+exm_repository_check_key (const gchar  *public_key,
+                          GError      **error);
 
 gboolean
 exm_repository_is_enabled (ExmRepository *self);

@@ -13,6 +13,7 @@
     <file>exm-installed-page.ui</file>
     <file>exm-install-button.ui</file>
     <file>exm-rating.ui</file>
+    <file>exm-repository-dialog.ui</file>
     <file>exm-screenshot-view.ui</file>
     <file>exm-screenshot.ui</file>
     <file>exm-search-row.ui</file>

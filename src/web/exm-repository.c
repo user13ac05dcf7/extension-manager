@@ -23,17 +23,16 @@
  * A static extension catalogue (index.json, schema version 1) used in place
  * of extensions.gnome.org when GNOME Shell is configured with one.
  *
- * The index is only trusted after its detached Ed25519 signature
- * (index.json.sig) verifies against the key pinned at build time, it has not
- * expired, and its serial is not lower than one seen before. Requests for the
+ * Both the index URL and its public key come from GNOME Shell. The index is
+ * only trusted after its detached Ed25519 signature (index.json.sig) verifies
+ * against that key, it has not expired, and its serial is not lower than one
+ * seen before. Requests for the
  * extensions.gnome.org API are then answered from the index in the same JSON
  * shape, so the rest of the application stays unchanged. GNOME Shell itself
  * downloads and checks the packages on install and update.
  */
 
 #include "exm-repository.h"
-
-#include "exm-config.h"
 
 #include <glib/gi18n.h>
 #include <gnutls/abstract.h>
@@ -53,6 +52,7 @@ struct _ExmRepository
 
     SoupSession *session;
     gchar *url;
+    gchar *key;
     guint generation;
 
     JsonNode *index;
@@ -75,46 +75,92 @@ exm_repository_get_default (void)
     return instance;
 }
 
-static gboolean
-is_allowed_url (const gchar *url)
+gboolean
+exm_repository_check_url (const gchar  *url,
+                          GError      **error)
 {
-    g_autoptr (GUri) uri = g_uri_parse (url, G_URI_FLAGS_NONE, NULL);
+    g_autoptr (GUri) uri = url ? g_uri_parse (url, G_URI_FLAGS_NONE, NULL) : NULL;
     const gchar *scheme, *host;
 
-    if (uri == NULL)
-        return FALSE;
+    if (uri != NULL)
+    {
+        scheme = g_uri_get_scheme (uri);
+        host = g_uri_get_host (uri);
 
-    scheme = g_uri_get_scheme (uri);
-    host = g_uri_get_host (uri);
+        if (g_strcmp0 (scheme, "https") == 0 && host != NULL && *host != '\0')
+            return TRUE;
 
-    if (g_strcmp0 (scheme, "https") == 0)
-        return TRUE;
+        // Plain HTTP only on the loopback interface, for tests
+        if (g_strcmp0 (scheme, "http") == 0 &&
+            (g_strcmp0 (host, "127.0.0.1") == 0 ||
+             g_strcmp0 (host, "::1") == 0 ||
+             g_strcmp0 (host, "localhost") == 0))
+            return TRUE;
+    }
 
-    // Plain HTTP only on the loopback interface, for tests
-    return g_strcmp0 (scheme, "http") == 0 &&
-           (g_strcmp0 (host, "127.0.0.1") == 0 ||
-            g_strcmp0 (host, "::1") == 0 ||
-            g_strcmp0 (host, "localhost") == 0);
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         _("The repository URL must be an HTTPS address"));
+    return FALSE;
 }
 
-void
-exm_repository_set_url (ExmRepository *self,
-                        const gchar   *url)
+gboolean
+exm_repository_check_key (const gchar  *public_key,
+                          GError      **error)
 {
+    g_autofree guchar *key = NULL;
+    gsize length = 0;
+
+    // g_base64_decode () accepts any input, so check the alphabet first
+    if (public_key != NULL && strlen (public_key) == 44 &&
+        strspn (public_key, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") == 44)
+        key = g_base64_decode (public_key, &length);
+
+    if (length != 32)
+    {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             _("The public key must be a base64 Ed25519 key (32 bytes)"));
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/**
+ * exm_repository_set_source:
+ * @url: (nullable): the index URL, or %NULL for extensions.gnome.org
+ * @public_key: (nullable): base64 of the raw Ed25519 key that signs the index
+ *
+ * A repository without a usable key is refused, so extensions.gnome.org is
+ * used instead.
+ */
+void
+exm_repository_set_source (ExmRepository *self,
+                           const gchar   *url,
+                           const gchar   *public_key)
+{
+    g_autoptr (GError) error = NULL;
+
     if (url != NULL && *url == '\0')
         url = NULL;
 
-    if (url != NULL && !is_allowed_url (url))
+    if (url != NULL &&
+        (!exm_repository_check_url (url, &error) ||
+         !exm_repository_check_key (public_key, &error)))
     {
-        g_warning ("Ignoring extension repository that does not use HTTPS: %s", url);
+        g_warning ("Ignoring extension repository %s: %s", url, error->message);
         url = NULL;
     }
 
-    if (g_strcmp0 (self->url, url) == 0)
+    if (url == NULL)
+        public_key = NULL;
+
+    if (g_strcmp0 (self->url, url) == 0 && g_strcmp0 (self->key, public_key) == 0)
         return;
 
     g_free (self->url);
+    g_free (self->key);
     self->url = g_strdup (url);
+    self->key = g_strdup (public_key);
     self->generation++;
     g_clear_pointer (&self->index, json_node_unref);
 
@@ -154,7 +200,7 @@ exm_repository_verify_signature (const gchar  *public_key,
     if (public_key == NULL || *public_key == '\0')
     {
         g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                             _("This build has no key for the extension repository"));
+                             _("No key is set for the extension repository"));
         return FALSE;
     }
 
@@ -811,7 +857,7 @@ on_signature (SoupSession  *session,
 
     if (data->generation == self->generation)
     {
-        if (!exm_repository_verify_signature (REPOSITORY_KEY, data->index, signature, &error))
+        if (!exm_repository_verify_signature (self->key, data->index, signature, &error))
         {
             finish_fetch (data, error);
             return;
@@ -919,6 +965,7 @@ exm_repository_finalize (GObject *object)
 
     g_clear_object (&self->session);
     g_clear_pointer (&self->url, g_free);
+    g_clear_pointer (&self->key, g_free);
     g_clear_pointer (&self->index, json_node_unref);
     g_clear_pointer (&self->waiting, g_ptr_array_unref);
 

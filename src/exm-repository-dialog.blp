@@ -1,0 +1,61 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $ExmRepositoryDialog: Adw.PreferencesDialog {
+  title: _("Extension Repository");
+  content-width: 560;
+  content-height: 480;
+
+  Adw.PreferencesPage {
+    Adw.PreferencesGroup {
+      title: _("Extension Repository");
+      description: _("GNOME Shell installs and updates extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below.");
+
+      Adw.EntryRow url_row {
+        title: _("Index URL");
+        input-purpose: url;
+        changed => $on_changed() swapped;
+      }
+
+      Adw.EntryRow key_row {
+        title: _("Public Key (Ed25519, base64)");
+        changed => $on_changed() swapped;
+      }
+    }
+
+    Adw.PreferencesGroup {
+      Gtk.Label error_label {
+        styles [
+          "error",
+        ]
+
+        visible: false;
+        wrap: true;
+        xalign: 0;
+      }
+    }
+
+    Adw.PreferencesGroup {
+      Gtk.Box {
+        orientation: horizontal;
+        spacing: 12;
+        halign: end;
+
+        Gtk.Button default_button {
+          label: _("Use extensions.gnome.org");
+          clicked => $on_use_default() swapped;
+        }
+
+        Gtk.Button apply_button {
+          styles [
+            "suggested-action",
+          ]
+
+          label: _("_Apply");
+          use-underline: true;
+          clicked => $on_apply() swapped;
+        }
+      }
+    }
+  }
+}

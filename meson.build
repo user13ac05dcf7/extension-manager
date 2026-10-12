@@ -31,7 +31,6 @@ config_h.set_quoted('PKG_NAME', get_option('package'))
 config_h.set_quoted('PKG_DISTRIBUTOR', get_option('distributor'))
 config_h.set10('IS_OFFICIAL', get_option('official'))
 config_h.set10('WITH_BACKTRACE', get_option('backtrace'))
-config_h.set_quoted('REPOSITORY_KEY', get_option('repository_key'))
 configure_file(
   output: 'exm-config.h',
   configuration: config_h,

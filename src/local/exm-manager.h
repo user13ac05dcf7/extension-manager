@@ -54,5 +54,17 @@ void          exm_manager_install_async     (ExmManager           *self,
 gboolean      exm_manager_install_finish    (GObject              *self,
                                              GAsyncResult         *result,
                                              GError              **error);
+gboolean      exm_manager_get_repository    (ExmManager           *self,
+                                             gchar               **url,
+                                             gchar               **public_key);
+void          exm_manager_set_repository_async  (ExmManager           *self,
+                                                 const gchar          *url,
+                                                 const gchar          *public_key,
+                                                 GCancellable         *cancellable,
+                                                 GAsyncReadyCallback   callback,
+                                                 gpointer              user_data);
+gboolean      exm_manager_set_repository_finish (ExmManager           *self,
+                                                 GAsyncResult         *result,
+                                                 GError              **error);
 
 G_END_DECLS
