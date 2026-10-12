@@ -1,0 +1,181 @@
+name: Flatpak
+
+# Builds this fork's x86_64 Flatpak from the checkout with
+# build-aux/fork/com.mattjakeman.ExtensionManager.json. Every push gets a
+# bundle to try as an artifact; pushes to PUBLISH_REF are also signed and
+# published as a Flatpak repository on GitHub Pages.
+#
+# The app keeps the official ID com.mattjakeman.ExtensionManager and the
+# branch "stable", so installing it from this repository replaces the Flathub
+# build in place; it is updated from here from then on. GNOME Shell looks for
+# com.mattjakeman.ExtensionManager.desktop to offer extension updates.
+
+on:
+  push:
+    branches-ignore:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PUBLISH_REF: refs/heads/flatpak-ci
+  APP_ID: com.mattjakeman.ExtensionManager
+  MANIFEST: build-aux/fork/com.mattjakeman.ExtensionManager.json
+  # The repository's own collection, not the app ID: refs from here are told
+  # apart from Flathub's (org.flathub.Stable) by it.
+  COLLECTION_ID: io.github.user13ac05dcf7.ExtensionManager
+  PAGES_URL: https://user13ac05dcf7.github.io/extension-manager
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the GNOME SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          version=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['runtime-version'])")
+          echo "SDK_VERSION=$version" >> "$GITHUB_ENV"
+          for attempt in 1 2 3; do
+            flatpak install --user -y --noninteractive flathub "org.gnome.Sdk//$version" && break
+            echo "install attempt $attempt failed; retrying"
+            sleep 30
+          done
+
+      - name: Run the tests
+        run: |
+          flatpak run --command=sh --filesystem="$GITHUB_WORKSPACE" "org.gnome.Sdk//$SDK_VERSION" -c \
+            "cd '$GITHUB_WORKSPACE' && meson setup _build -Dbacktrace=false && meson test -C _build --print-errorlogs"
+
+  build:
+    name: Build x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak-builder and the GNOME runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder ostree
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          version=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['runtime-version'])")
+          for attempt in 1 2 3; do
+            flatpak install --user -y --noninteractive --no-static-deltas flathub \
+              "org.gnome.Platform//$version" "org.gnome.Sdk//$version" && break
+            echo "install attempt $attempt failed; retrying"
+            sleep 30
+          done
+
+      # libbacktrace changes rarely: keep flatpak-builder's cache between runs.
+      - uses: actions/cache@v4
+        with:
+          path: .flatpak-builder
+          key: flatpak-builder-${{ hashFiles(env.MANIFEST) }}-${{ github.sha }}
+          restore-keys: flatpak-builder-${{ hashFiles(env.MANIFEST) }}-
+
+      # Without the secret the build still makes the bundle; only the signed
+      # repository is left out.
+      - name: Import the signing key
+        id: key
+        if: github.ref == env.PUBLISH_REF
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$FLATPAK_GPG_PRIVATE_KEY" ]; then
+            echo "::warning::FLATPAK_GPG_PRIVATE_KEY is not set: building the bundle only, nothing is published"
+            exit 0
+          fi
+          echo "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          FINGERPRINT: ${{ steps.key.outputs.fingerprint }}
+        run: |
+          ostree init --repo=repo --mode=archive-z2 --collection-id="$COLLECTION_ID"
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --repo=repo --default-branch=stable \
+            ${FINGERPRINT:+--gpg-sign=$FINGERPRINT} \
+            build-dir "$MANIFEST"
+          flatpak build-bundle repo ExtensionManager-x86_64.flatpak "$APP_ID" stable \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ExtensionManager-x86_64
+          path: ExtensionManager-x86_64.flatpak
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Prepare the repository site
+        if: steps.key.outputs.fingerprint != ''
+        env:
+          FINGERPRINT: ${{ steps.key.outputs.fingerprint }}
+        run: |
+          flatpak build-update-repo --gpg-sign="$FINGERPRINT" --generate-static-deltas \
+            --prune --title="Extension Manager (extension repository fork)" --default-branch=stable repo
+          url="$PAGES_URL"
+          key=$(gpg --batch --export "$FINGERPRINT" | base64 -w0)
+          mkdir -p site
+          mv repo site/repo
+          cat > site/extension-manager.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=Extension Manager (extension repository fork)
+          Url=$url/repo/
+          Homepage=https://github.com/$GITHUB_REPOSITORY
+          Comment=Extension Manager builds from $GITHUB_REPOSITORY
+          DefaultBranch=stable
+          DeployCollectionID=$COLLECTION_ID
+          GPGKey=$key
+          EOF
+          cat > "site/$APP_ID.flatpakref" <<EOF
+          [Flatpak Ref]
+          Title=Extension Manager
+          Name=$APP_ID
+          Branch=stable
+          Url=$url/repo/
+          IsRuntime=false
+          SuggestRemoteName=extension-manager-fork
+          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          DeployCollectionID=$COLLECTION_ID
+          GPGKey=$key
+          EOF
+          sed -i 's/^ *//' site/extension-manager.flatpakrepo "site/$APP_ID.flatpakref"
+          printf '<!doctype html><title>Extension Manager Flatpak</title><p><a href="%s.flatpakref">Install Extension Manager</a> · <a href="extension-manager.flatpakrepo">Add the repository</a></p>\n' \
+            "$APP_ID" > site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.key.outputs.fingerprint != ''
+        with:
+          path: site
+
+    outputs:
+      signed: ${{ steps.key.outputs.fingerprint != '' }}
+
+  publish:
+    name: Publish to GitHub Pages
+    needs: [test, build]
+    if: needs.build.outputs.signed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
