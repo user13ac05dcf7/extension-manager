@@ -6,7 +6,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#define G_SETTINGS_ENABLE_BACKEND
+
+#include "exm-config.h"
 #include "web/exm-repository.h"
+
+#include <gio/gsettingsbackend.h>
 
 /* Throwaway Ed25519 key and a signature over SIGNED, made with OpenSSL 3 */
 #define TEST_KEY "YFE8ykXr/yYORPmP97MV/8VteVwEkDe9FKDEewtcHno="
@@ -213,6 +218,91 @@ test_source_checks (void)
     g_assert_false (exm_repository_check_key (NULL, NULL));
 }
 
+static GSettings *
+app_settings (void)
+{
+    g_autoptr (GSettingsSchemaSource) source = NULL;
+    g_autoptr (GSettingsSchema) schema = NULL;
+    g_autoptr (GSettingsBackend) backend = g_memory_settings_backend_new ();
+    GError *error = NULL;
+
+    source = g_settings_schema_source_new_from_directory (TEST_SCHEMA_DIR, NULL, TRUE, &error);
+    g_assert_no_error (error);
+    schema = g_settings_schema_source_lookup (source, APP_ID, FALSE);
+    g_assert_nonnull (schema);
+
+    return g_settings_new_full (schema, backend, NULL);
+}
+
+static void
+test_own_settings (void)
+{
+    g_autoptr (GSettings) settings = app_settings ();
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *key = NULL;
+    GError *error = NULL;
+
+    g_unsetenv ("EXM_EXTENSION_REPOSITORY");
+    g_unsetenv ("EXM_EXTENSION_REPOSITORY_KEY");
+
+    // A stock Shell has no repository; the application's default is used
+    g_assert_cmpint (exm_repository_choose_source (NULL, NULL, settings, &url, &key),
+                     ==, EXM_REPOSITORY_ORIGIN_SETTINGS);
+    g_assert_cmpstr (url, ==, "https://shell-extension-registry-81c4e5.gitlab.io/index.json");
+    g_assert_cmpstr (key, ==, "37rwPeZLAvu/3PO70cbnr6trHwutr7SetPnOkCNm5/g=");
+    g_assert_true (exm_repository_check_source (url, key, NULL));
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&key, g_free);
+
+    g_assert_true (exm_repository_store_source (settings, "http://127.0.0.1:8765/index.json", TEST_KEY, &error));
+    g_assert_no_error (error);
+    exm_repository_choose_source (NULL, NULL, settings, &url, &key);
+    g_assert_cmpstr (url, ==, "http://127.0.0.1:8765/index.json");
+    g_assert_cmpstr (key, ==, TEST_KEY);
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&key, g_free);
+
+    // Both or neither, and checked like the Shell does
+    g_assert_false (exm_repository_store_source (settings, "https://registry.example/index.json", "", &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    g_assert_false (exm_repository_store_source (settings, "", TEST_KEY, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    g_assert_false (exm_repository_store_source (settings, "http://example.com/index.json", TEST_KEY, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+    g_clear_error (&error);
+    g_assert_false (exm_repository_store_source (settings, "https://registry.example/index.json", SIGNATURE, NULL));
+
+    exm_repository_choose_source (NULL, NULL, settings, &url, &key);
+    g_assert_cmpstr (url, ==, "http://127.0.0.1:8765/index.json");
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&key, g_free);
+
+    // Empty: extensions.gnome.org
+    g_assert_true (exm_repository_store_source (settings, "", "", NULL));
+    exm_repository_choose_source (NULL, NULL, settings, &url, &key);
+    g_assert_cmpstr (url, ==, "");
+    g_assert_cmpstr (key, ==, "");
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&key, g_free);
+
+    // A Shell with a repository decides, even when it uses extensions.gnome.org
+    g_assert_true (exm_repository_store_source (settings, "https://registry.example/index.json", TEST_KEY, NULL));
+    g_assert_cmpint (exm_repository_choose_source ("", "", settings, &url, &key),
+                     ==, EXM_REPOSITORY_ORIGIN_SHELL);
+    g_assert_cmpstr (url, ==, "");
+    g_clear_pointer (&url, g_free);
+    g_clear_pointer (&key, g_free);
+
+    g_setenv ("EXM_EXTENSION_REPOSITORY", "http://127.0.0.1:1/index.json", TRUE);
+    g_assert_cmpint (exm_repository_choose_source (NULL, NULL, settings, &url, &key),
+                     ==, EXM_REPOSITORY_ORIGIN_ENVIRONMENT);
+    g_assert_cmpstr (url, ==, "http://127.0.0.1:1/index.json");
+    g_assert_cmpstr (key, ==, "");
+    g_unsetenv ("EXM_EXTENSION_REPOSITORY");
+}
+
 static void
 test_routing (void)
 {
@@ -252,6 +342,7 @@ main (int argc, char *argv[])
     g_test_add_func ("/repository/unavailable", test_unavailable);
     g_test_add_func ("/repository/source-checks", test_source_checks);
     g_test_add_func ("/repository/routing", test_routing);
+    g_test_add_func ("/repository/own-settings", test_own_settings);
 
     return g_test_run ();
 }

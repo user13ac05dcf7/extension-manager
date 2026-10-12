@@ -21,15 +21,16 @@
 
 /*
  * A static extension catalogue (index.json, schema version 1) used in place
- * of extensions.gnome.org when GNOME Shell is configured with one.
+ * of extensions.gnome.org.
  *
- * Both the index URL and its public key come from GNOME Shell. The index is
- * only trusted after its detached Ed25519 signature (index.json.sig) verifies
- * against that key, it has not expired, and its serial is not lower than one
- * seen before. Requests for the
- * extensions.gnome.org API are then answered from the index in the same JSON
- * shape, so the rest of the application stays unchanged. GNOME Shell itself
- * downloads and checks the packages on install and update.
+ * The index URL and its public key come from GNOME Shell when it uses such a
+ * repository itself, and from the application's settings otherwise. The index
+ * is only trusted after its detached Ed25519 signature (index.json.sig)
+ * verifies against that key, it has not expired, and its serial is not lower
+ * than one seen before. Requests for the extensions.gnome.org API are then
+ * answered from the index in the same JSON shape, so the rest of the
+ * application stays unchanged. GNOME Shell itself downloads and checks the
+ * packages on install and update.
  */
 
 #include "exm-repository.h"
@@ -121,6 +122,116 @@ exm_repository_check_key (const gchar  *public_key,
                              _("The public key must be a base64 Ed25519 key (32 bytes)"));
         return FALSE;
     }
+
+    return TRUE;
+}
+
+/**
+ * exm_repository_check_source:
+ * @url: (nullable): the index URL, empty for extensions.gnome.org
+ * @public_key: (nullable): base64 of the raw Ed25519 key that signs the index
+ *
+ * Returns: whether both are usable, or both are empty
+ */
+gboolean
+exm_repository_check_source (const gchar  *url,
+                             const gchar  *public_key,
+                             GError      **error)
+{
+    gboolean has_url = url != NULL && *url != '\0';
+    gboolean has_key = public_key != NULL && *public_key != '\0';
+
+    if (!has_url && !has_key)
+        return TRUE;
+
+    if (!has_url || !has_key)
+    {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             _("Set both the index URL and its public key, or neither"));
+        return FALSE;
+    }
+
+    return exm_repository_check_url (url, error) &&
+           exm_repository_check_key (public_key, error);
+}
+
+/**
+ * exm_repository_choose_source:
+ * @shell_url: (nullable): GNOME Shell's ExtensionRepository property, or
+ *   %NULL if the Shell has none
+ * @shell_key: (nullable): GNOME Shell's ExtensionRepositoryKey property
+ * @settings: (nullable): the application settings
+ * @url: (out): the index URL, empty for extensions.gnome.org
+ * @public_key: (out): the key that signs the index
+ *
+ * A Shell that uses a repository itself decides, so what is shown is what it
+ * installs. Otherwise EXM_EXTENSION_REPOSITORY and
+ * EXM_EXTENSION_REPOSITORY_KEY set one for testing, and the application's own
+ * settings are used.
+ *
+ * Returns: where the repository comes from
+ */
+ExmRepositoryOrigin
+exm_repository_choose_source (const gchar  *shell_url,
+                              const gchar  *shell_key,
+                              GSettings    *settings,
+                              gchar       **url,
+                              gchar       **public_key)
+{
+    if (shell_url != NULL && shell_key != NULL)
+    {
+        *url = g_strdup (shell_url);
+        *public_key = g_strdup (shell_key);
+        return EXM_REPOSITORY_ORIGIN_SHELL;
+    }
+
+    if (g_getenv ("EXM_EXTENSION_REPOSITORY") != NULL)
+    {
+        *url = g_strdup (g_getenv ("EXM_EXTENSION_REPOSITORY"));
+        *public_key = g_strdup (g_getenv ("EXM_EXTENSION_REPOSITORY_KEY") ?: "");
+        return EXM_REPOSITORY_ORIGIN_ENVIRONMENT;
+    }
+
+    *url = settings ? g_settings_get_string (settings, "extension-repository") : g_strdup ("");
+    *public_key = settings ? g_settings_get_string (settings, "extension-repository-key") : g_strdup ("");
+    return EXM_REPOSITORY_ORIGIN_SETTINGS;
+}
+
+/**
+ * exm_repository_store_source:
+ * @settings: the application settings
+ * @url: (nullable): the index URL, or empty for extensions.gnome.org
+ * @public_key: (nullable): the key that signs the index, or empty
+ *
+ * Checks both and writes them together, so the repository is never seen with
+ * the key of another one.
+ */
+gboolean
+exm_repository_store_source (GSettings    *settings,
+                             const gchar  *url,
+                             const gchar  *public_key,
+                             GError      **error)
+{
+    g_autoptr (GSettingsSchema) schema = NULL;
+    g_autoptr (GSettingsBackend) backend = NULL;
+    g_autoptr (GSettings) batch = NULL;
+    g_autofree gchar *path = NULL;
+
+    if (!exm_repository_check_source (url, public_key, error))
+        return FALSE;
+
+    // A separate object, as delay-apply mode stays on once set
+    g_object_get (settings,
+                  "settings-schema", &schema,
+                  "backend", &backend,
+                  "path", &path,
+                  NULL);
+    batch = g_settings_new_full (schema, backend, path);
+
+    g_settings_delay (batch);
+    g_settings_set_string (batch, "extension-repository", url ? url : "");
+    g_settings_set_string (batch, "extension-repository-key", public_key ? public_key : "");
+    g_settings_apply (batch);
 
     return TRUE;
 }

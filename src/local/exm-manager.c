@@ -21,6 +21,7 @@
 
 #include "exm-manager.h"
 
+#include "exm-config.h"
 #include "shell-dbus-interface.h"
 
 #include "../exm-types.h"
@@ -35,6 +36,7 @@ struct _ExmManager
 
     ShellExtensions *proxy;
     GListModel *ext_model;
+    GSettings *settings;
 
     const gchar *shell_version;
     gboolean extensions_enabled;
@@ -847,10 +849,11 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
  * GNOME Shell installs and updates from the catalogue in its
  * extension-repository settings, exposes them as the read-only
  * ExtensionRepository and ExtensionRepositoryKey properties and changes them
- * with SetExtensionRepository. Browse the same catalogue, so what
- * is shown is what the Shell installs. A Shell without these properties uses
- * extensions.gnome.org; EXM_EXTENSION_REPOSITORY and
- * EXM_EXTENSION_REPOSITORY_KEY then set a repository for testing.
+ * with SetExtensionRepository. Browse the same catalogue, so what is shown is
+ * what the Shell installs. A Shell without these properties installs from
+ * extensions.gnome.org; the repository then comes from the application's
+ * own settings (or EXM_EXTENSION_REPOSITORY and EXM_EXTENSION_REPOSITORY_KEY,
+ * for testing).
  */
 #define REPOSITORY_PROPERTY "ExtensionRepository"
 #define REPOSITORY_KEY_PROPERTY "ExtensionRepositoryKey"
@@ -860,6 +863,9 @@ get_string_property (ExmManager  *self,
                      const gchar *name)
 {
     g_autoptr (GVariant) value = NULL;
+
+    if (self->proxy == NULL)
+        return NULL;
 
     value = g_dbus_proxy_get_cached_property (G_DBUS_PROXY (self->proxy), name);
 
@@ -871,27 +877,32 @@ get_string_property (ExmManager  *self,
 
 /**
  * exm_manager_get_repository:
- * @url: (out) (optional): the repository the Shell uses, empty for
+ * @url: (out) (optional): the repository in use, empty for
  *   extensions.gnome.org
  * @public_key: (out) (optional): the key that signs its index
  *
- * Returns: whether the Shell supports extension repositories
+ * Returns: where the repository comes from
  */
-gboolean
+ExmRepositoryOrigin
 exm_manager_get_repository (ExmManager  *self,
                             gchar      **url,
                             gchar      **public_key)
 {
     g_autofree gchar *shell_url = get_string_property (self, REPOSITORY_PROPERTY);
     g_autofree gchar *shell_key = get_string_property (self, REPOSITORY_KEY_PROPERTY);
-    gboolean supported = shell_url != NULL && shell_key != NULL;
+    g_autofree gchar *chosen_url = NULL;
+    g_autofree gchar *chosen_key = NULL;
+    ExmRepositoryOrigin origin;
+
+    origin = exm_repository_choose_source (shell_url, shell_key, self->settings,
+                                           &chosen_url, &chosen_key);
 
     if (url)
-        *url = g_strdup (supported ? shell_url : "");
+        *url = g_steal_pointer (&chosen_url);
     if (public_key)
-        *public_key = g_strdup (supported ? shell_key : "");
+        *public_key = g_steal_pointer (&chosen_key);
 
-    return supported;
+    return origin;
 }
 
 static void
@@ -900,12 +911,16 @@ update_repository (ExmManager *self)
     g_autofree gchar *url = NULL;
     g_autofree gchar *key = NULL;
 
-    if (exm_manager_get_repository (self, &url, &key))
-        exm_repository_set_source (exm_repository_get_default (), url, key);
-    else
-        exm_repository_set_source (exm_repository_get_default (),
-                                   g_getenv ("EXM_EXTENSION_REPOSITORY"),
-                                   g_getenv ("EXM_EXTENSION_REPOSITORY_KEY"));
+    exm_manager_get_repository (self, &url, &key);
+    exm_repository_set_source (exm_repository_get_default (), url, key);
+}
+
+static void
+on_settings_changed (ExmManager  *self,
+                     const gchar *key)
+{
+    if (g_str_has_prefix (key, "extension-repository"))
+        update_repository (self);
 }
 
 static void
@@ -943,8 +958,9 @@ on_repository_set (GDBusConnection *connection,
  * @url: the index URL, or "" for extensions.gnome.org
  * @public_key: the key that signs the index, or ""
  *
- * Sets the repository the Shell installs and updates from. The Shell checks
- * both and changes them together.
+ * Sets the repository the Shell installs and updates from when it has one,
+ * and the application's own otherwise. Both are checked and changed
+ * together.
  */
 void
 exm_manager_set_repository_async (ExmManager          *self,
@@ -956,6 +972,18 @@ exm_manager_set_repository_async (ExmManager          *self,
 {
     GTask *task = g_task_new (self, cancellable, callback, user_data);
     GDBusProxy *proxy = G_DBUS_PROXY (self->proxy);
+    GError *error = NULL;
+
+    if (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL)
+    {
+        if (exm_repository_store_source (self->settings, url, public_key, &error))
+            g_task_return_boolean (task, TRUE);
+        else
+            g_task_return_error (task, error);
+
+        g_object_unref (task);
+        return;
+    }
 
     g_dbus_connection_call (g_dbus_proxy_get_connection (proxy),
                             g_dbus_proxy_get_name (proxy),
@@ -979,6 +1007,26 @@ exm_manager_set_repository_finish (ExmManager    *self,
     g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
 
     return g_task_propagate_boolean (G_TASK (result), error);
+}
+
+/**
+ * exm_manager_reset_repository:
+ *
+ * Goes back to the repository the application comes with. Only for its own
+ * settings; a Shell with a repository keeps its own.
+ */
+void
+exm_manager_reset_repository (ExmManager *self)
+{
+    g_autoptr (GSettings) batch = NULL;
+
+    g_return_if_fail (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL);
+
+    batch = g_settings_new (APP_ID);
+    g_settings_delay (batch);
+    g_settings_reset (batch, "extension-repository");
+    g_settings_reset (batch, "extension-repository-key");
+    g_settings_apply (batch);
 }
 
 static void
@@ -1005,6 +1053,10 @@ exm_manager_init (ExmManager *self)
 {
     GError *error = NULL;
 
+    self->settings = g_settings_new (APP_ID);
+    g_signal_connect_swapped (self->settings, "changed",
+                              G_CALLBACK (on_settings_changed), self);
+
     self->proxy = shell_extensions_proxy_new_for_bus_sync (G_BUS_TYPE_SESSION,
                                                            G_DBUS_PROXY_FLAGS_NONE,
                                                            "org.gnome.Shell.Extensions",
@@ -1014,6 +1066,7 @@ exm_manager_init (ExmManager *self)
     if (error != NULL)
     {
         notify_error (self, "Could not create proxy: %s\n", error->message);
+        update_repository (self);
         return;
     }
 
