@@ -87,12 +87,15 @@ exm_package_get_shell_dir (void)
 
 /**
  * exm_package_get_shell_settings:
+ * @schema_copy: (out): whether the application's copy of the schema is used,
+ *   see exm_package_enable()
  *
  * Returns: (transfer full): GNOME Shell's settings, for enabled-extensions
  *   and disabled-extensions
  */
 GSettings *
-exm_package_get_shell_settings (GError **error)
+exm_package_get_shell_settings (gboolean  *schema_copy,
+                                GError   **error)
 {
     GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
     g_autoptr (GSettingsSchemaSource) own_source = NULL;
@@ -111,6 +114,8 @@ exm_package_get_shell_settings (GError **error)
 
         schema = g_settings_schema_source_lookup (own_source, "org.gnome.shell", FALSE);
     }
+
+    *schema_copy = (own_source != NULL);
 
     if (schema == NULL)
     {
@@ -134,26 +139,42 @@ exm_package_get_shell_settings (GError **error)
 /**
  * exm_package_enable:
  * @shell_settings: GNOME Shell's settings
+ * @schema_copy: whether they use the application's copy of the schema
  * @uuid: an installed extension
  *
  * Adds @uuid to enabled-extensions and removes it from disabled-extensions.
  * GNOME Shell's EnableExtension method refuses extensions it has not loaded,
  * so this is how a newly installed extension starts at the next login.
+ *
+ * With the copy of the schema, the defaults of the system (vendor overrides,
+ * system databases) are not known. A list the user has never changed is then
+ * left alone, as writing it would drop the extensions enabled by default.
  */
 gboolean
 exm_package_enable (GSettings    *shell_settings,
+                    gboolean      schema_copy,
                     const gchar  *uuid,
                     GError      **error)
 {
     g_auto (GStrv) enabled = g_settings_get_strv (shell_settings, "enabled-extensions");
     g_auto (GStrv) disabled = g_settings_get_strv (shell_settings, "disabled-extensions");
+    g_autoptr (GVariant) user_enabled = g_settings_get_user_value (shell_settings, "enabled-extensions");
     g_autoptr (GStrvBuilder) new_enabled = g_strv_builder_new ();
     g_autoptr (GStrvBuilder) new_disabled = g_strv_builder_new ();
     g_auto (GStrv) enabled_list = NULL;
     g_auto (GStrv) disabled_list = NULL;
+    gboolean enable = !g_strv_contains ((const gchar * const *) enabled, uuid);
+    gboolean undisable = g_strv_contains ((const gchar * const *) disabled, uuid);
+
+    if (enable && schema_copy && user_enabled == NULL)
+    {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                             _("GNOME Shell's list of enabled extensions is not known here; enable the extension after logging in"));
+        return FALSE;
+    }
 
     g_strv_builder_addv (new_enabled, (const gchar **) enabled);
-    if (!g_strv_contains ((const gchar * const *) enabled, uuid))
+    if (enable)
         g_strv_builder_add (new_enabled, uuid);
 
     for (gchar **item = disabled; *item != NULL; item++)
@@ -165,8 +186,11 @@ exm_package_enable (GSettings    *shell_settings,
     enabled_list = g_strv_builder_end (new_enabled);
     disabled_list = g_strv_builder_end (new_disabled);
 
-    if (!g_settings_set_strv (shell_settings, "disabled-extensions", (const gchar * const *) disabled_list) ||
-        !g_settings_set_strv (shell_settings, "enabled-extensions", (const gchar * const *) enabled_list))
+    // Only what changes is written, keeping the defaults of the rest
+    if ((undisable &&
+         !g_settings_set_strv (shell_settings, "disabled-extensions", (const gchar * const *) disabled_list)) ||
+        (enable &&
+         !g_settings_set_strv (shell_settings, "enabled-extensions", (const gchar * const *) enabled_list)))
     {
         g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
                              _("GNOME Shell's list of enabled extensions cannot be changed"));

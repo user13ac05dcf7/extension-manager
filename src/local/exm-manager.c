@@ -401,7 +401,7 @@ on_package_installed (GObject      *source G_GNUC_UNUSED,
     const gchar *uuid = g_task_get_task_data (task);
     g_autoptr (GSettings) shell_settings = NULL;
     GError *error = NULL;
-    gboolean staged;
+    gboolean staged, schema_copy;
 
     if (!exm_package_install_finish (res, &staged, &error))
     {
@@ -414,9 +414,10 @@ on_package_installed (GObject      *source G_GNUC_UNUSED,
     // An update replaces the installed version at login and stays enabled
     if (!staged)
     {
-        shell_settings = exm_package_get_shell_settings (&error);
+        shell_settings = exm_package_get_shell_settings (&schema_copy, &error);
 
-        if (shell_settings == NULL || !exm_package_enable (shell_settings, uuid, &error))
+        if (shell_settings == NULL ||
+            !exm_package_enable (shell_settings, schema_copy, uuid, &error))
         {
             notify_error (self, "Extension '%s' is installed, but could not be enabled: %s\n",
                           uuid, error->message);

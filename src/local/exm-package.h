@@ -29,7 +29,8 @@ gchar *
 exm_package_get_shell_dir (void);
 
 GSettings *
-exm_package_get_shell_settings (GError **error);
+exm_package_get_shell_settings (gboolean  *schema_copy,
+                                GError   **error);
 
 void
 exm_package_install_async (const gchar         *uuid,
@@ -49,6 +50,7 @@ exm_package_install_finish (GAsyncResult  *result,
 
 gboolean
 exm_package_enable (GSettings    *shell_settings,
+                    gboolean      schema_copy,
                     const gchar  *uuid,
                     GError      **error);
 
