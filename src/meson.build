@@ -52,6 +52,7 @@ exm_deps = [
   dependency('libxml-2.0'),
   dependency('glycin-2'),
   dependency('glycin-gtk4-2'),
+  dependency('gnutls'),
 ]
 
 if libbacktrace_dep.found()

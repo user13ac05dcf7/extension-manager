@@ -21,6 +21,8 @@
 
 #include "exm-request-handler.h"
 
+#include "exm-repository.h"
+
 #include <gio/gio.h>
 #include <glib/gi18n.h>
 #include <libsoup/soup.h>
@@ -107,12 +109,44 @@ typedef struct
 } RequestData;
 
 static void
+return_response (GTask                  *task,
+                 ExmRequestHandlerClass *klass,
+                 GBytes                 *bytes)
+{
+    GError *error = NULL;
+    gpointer result = klass->handle_response (bytes, &error);
+
+    if (result == NULL)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, result, g_object_unref);
+}
+
+static void
+repository_callback (ExmRepository *repository,
+                     GAsyncResult  *res,
+                     RequestData   *data)
+{
+    GError *error = NULL;
+    GBytes *bytes = exm_repository_request_finish (repository, res, &error);
+
+    if (bytes == NULL)
+        g_task_return_error (data->task, error);
+    else
+        return_response (data->task, EXM_REQUEST_HANDLER_GET_CLASS (data->self), bytes);
+
+    g_clear_pointer (&bytes, g_bytes_unref);
+    g_object_unref (data->self);
+    g_object_unref (data->task);
+    g_free (data);
+}
+
+static void
 request_callback (GObject      *source,
                   GAsyncResult *res,
                   RequestData  *data)
 {
     GBytes *bytes;
-    GListModel *model;
     guint status_code;
     GError *error = NULL;
 
@@ -150,12 +184,7 @@ request_callback (GObject      *source,
         }
 
         // Get derived class to handle response
-        model = klass->handle_response (bytes, &error);
-
-        if (model == NULL)
-            g_task_return_error (data->task, error);
-        else
-            g_task_return_pointer (data->task, model, g_object_unref);
+        return_response (data->task, klass, bytes);
 
         g_bytes_unref (bytes);
     }
@@ -185,6 +214,18 @@ exm_request_handler_request_async (ExmRequestHandler   *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
 
+    // A configured extension repository answers in place of extensions.gnome.org
+    if (exm_repository_handles (exm_repository_get_default (), url_endpoint))
+    {
+        RequestData *data = g_new0 (RequestData, 1);
+        data->self = g_object_ref (self);
+        data->task = task;
+
+        exm_repository_request_async (exm_repository_get_default (), url_endpoint, cancellable,
+                                      (GAsyncReadyCallback) repository_callback, data);
+        return;
+    }
+
     if (klass->cache_ttl_seconds > 0)
     {
         CacheEntry *entry;
@@ -194,13 +235,7 @@ exm_request_handler_request_async (ExmRequestHandler   *self,
 
         if (entry != NULL)
         {
-            GError *error = NULL;
-            gpointer result = klass->handle_response (entry->bytes, &error);
-
-            if (result == NULL)
-                g_task_return_error (task, error);
-            else
-                g_task_return_pointer (task, result, g_object_unref);
+            return_response (task, klass, entry->bytes);
 
             g_object_unref (task);
             return;

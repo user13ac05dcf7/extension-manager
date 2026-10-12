@@ -25,6 +25,7 @@
 
 #include "../exm-types.h"
 #include "../exm-enums.h"
+#include "../web/exm-repository.h"
 
 struct _ExmManager
 {
@@ -840,6 +841,28 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
         queue_notify_extension_updates (self);
 }
 
+/*
+ * GNOME Shell installs and updates from the catalogue in its
+ * extension-repository setting. Browse it too, so what is shown is what the
+ * Shell will install. A Shell without the ExtensionRepository property uses
+ * extensions.gnome.org; EXM_EXTENSION_REPOSITORY then sets one for testing.
+ */
+static void
+update_repository (ExmManager *self)
+{
+    g_autoptr (GVariant) value = NULL;
+    const gchar *url;
+
+    value = g_dbus_proxy_get_cached_property (G_DBUS_PROXY (self->proxy), "ExtensionRepository");
+
+    if (value != NULL && g_variant_is_of_type (value, G_VARIANT_TYPE_STRING))
+        url = g_variant_get_string (value, NULL);
+    else
+        url = g_getenv ("EXM_EXTENSION_REPOSITORY");
+
+    exm_repository_set_url (exm_repository_get_default (), url);
+}
+
 static void
 update_is_supported (ExmManager *self)
 {
@@ -849,6 +872,8 @@ update_is_supported (ExmManager *self)
     owner = g_dbus_proxy_get_name_owner (G_DBUS_PROXY (self->proxy));
     supported = (owner != NULL);
     g_free (owner);
+
+    update_repository (self);
 
     if (supported == self->is_supported)
         return;
@@ -878,6 +903,8 @@ exm_manager_init (ExmManager *self)
 
     g_signal_connect_swapped (self->proxy, "notify::g-name-owner",
                               G_CALLBACK (update_is_supported), self);
+    g_signal_connect_swapped (self->proxy, "g-properties-changed",
+                              G_CALLBACK (update_repository), self);
     update_is_supported (self);
 
     g_object_bind_property (self->proxy, "shell-version",

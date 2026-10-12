@@ -3,6 +3,7 @@ exm_sources += files([
   'exm-data-provider.c',
   'exm-image-resolver.c',
   'exm-profile-provider.c',
+  'exm-repository.c',
   'exm-request-handler.c',
   'exm-search-provider.c',
   'exm-versions-provider.c',

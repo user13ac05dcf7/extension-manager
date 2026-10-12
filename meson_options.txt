@@ -23,3 +23,11 @@ option('distributor',
 	type: 'string',
 	value: 'Unknown Author',
 	description: 'The package distributor (e.g. "Your Name <optional email>")')
+
+# Base64 of the raw 32-byte Ed25519 public key that signs the extension
+# repository index (GNOME Shell's extension-repository setting). Without it,
+# a configured repository is refused.
+option('repository_key',
+	type: 'string',
+	value: '',
+	description: 'Pinned public key of the extension repository')

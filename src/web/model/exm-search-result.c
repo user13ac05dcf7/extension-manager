@@ -45,6 +45,7 @@ struct _ExmSearchResult
     gchar *url;
     gchar **donation_urls;
     gchar *link;
+    gchar *tier;
 };
 
 static JsonSerializableIface *serializable_iface = NULL;
@@ -75,6 +76,7 @@ enum {
     PROP_URL,
     PROP_DONATION_URLS,
     PROP_LINK,
+    PROP_TIER,
     N_PROPS
 };
 
@@ -150,6 +152,9 @@ exm_search_result_get_property (GObject    *object,
     case PROP_LINK:
         g_value_set_string (value, self->link);
         break;
+    case PROP_TIER:
+        g_value_set_string (value, self->tier);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -212,6 +217,9 @@ exm_search_result_set_property (GObject      *object,
         break;
     case PROP_LINK:
         self->link = g_value_dup_string (value);
+        break;
+    case PROP_TIER:
+        self->tier = g_value_dup_string (value);
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -349,6 +357,14 @@ exm_search_result_class_init (ExmSearchResultClass *klass)
         g_param_spec_string ("link",
                              "Link",
                              "Link",
+                             NULL,
+                             G_PARAM_READWRITE|G_PARAM_CONSTRUCT_ONLY);
+
+    /* Review tier from an extension repository; unset for extensions.gnome.org */
+    properties [PROP_TIER] =
+        g_param_spec_string ("tier",
+                             "Tier",
+                             "Tier",
                              NULL,
                              G_PARAM_READWRITE|G_PARAM_CONSTRUCT_ONLY);
 

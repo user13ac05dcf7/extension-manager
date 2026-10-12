@@ -810,7 +810,8 @@ on_data_loaded (GObject      *source,
     {
         if (!exm_manager_is_installed_uuid (self->manager, self->uuid))
         {
-            if (error->domain == g_quark_try_string ("request-error-quark") && error->code == 404)
+            if ((error->domain == g_quark_try_string ("request-error-quark") && error->code == 404) ||
+                g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
             {
                 gtk_stack_set_visible_child_name (self->stack, "page_empty");
             }
@@ -833,7 +834,7 @@ on_data_loaded (GObject      *source,
     if (EXM_IS_SEARCH_RESULT (data))
     {
         guint id;
-        gchar *uuid, *name, *screenshot_uri, *icon_uri, *link;
+        gchar *uuid, *name, *screenshot_uri, *icon_uri, *link, *tier;
         gchar **donation_urls;
         g_object_get (data,
                       "id", &id,
@@ -843,6 +844,7 @@ on_data_loaded (GObject      *source,
                       "icon", &icon_uri,
                       "donation_urls", &donation_urls,
                       "link", &link,
+                      "tier", &tier,
                       NULL);
 
         exm_unified_data_set_web_data (self->data, data);
@@ -892,11 +894,29 @@ on_data_loaded (GObject      *source,
 
         update_donation_rows (self, donation_urls);
 
-        self->uri_extensions = g_uri_resolve_relative ("https://extensions.gnome.org/",
-                                                       link,
-                                                       G_URI_FLAGS_NONE,
-                                                       NULL);
-        adw_action_row_set_subtitle (self->link_extensions, self->uri_extensions);
+        g_clear_pointer (&self->uri_extensions, g_free);
+        if (link != NULL)
+            self->uri_extensions = g_uri_resolve_relative ("https://extensions.gnome.org/",
+                                                           link,
+                                                           G_URI_FLAGS_NONE,
+                                                           NULL);
+        adw_action_row_set_subtitle (self->link_extensions, self->uri_extensions ? self->uri_extensions : "");
+        gtk_widget_set_visible (GTK_WIDGET (self->link_extensions), self->uri_extensions != NULL);
+
+        // Extensions from a repository carry the review of their origin; they
+        // have no comments or download counts here.
+        if (g_strcmp0 (tier, "ego-mirror") == 0)
+            adw_preferences_row_set_title (ADW_PREFERENCES_ROW (self->link_extensions),
+                                           _("Reviewed by extensions.gnome.org"));
+        else
+            adw_preferences_row_set_title (ADW_PREFERENCES_ROW (self->link_extensions),
+                                           _("View on Extensions"));
+
+        if (tier != NULL)
+        {
+            gtk_widget_set_visible (GTK_WIDGET (self->comments_section), FALSE);
+            gtk_widget_set_visible (GTK_WIDGET (self->downloads_row), FALSE);
+        }
 
         g_clear_object (&self->ext_versions_dialog);
         g_clear_pointer (&self->versions_next_url, g_free);
@@ -935,7 +955,10 @@ on_data_loaded (GObject      *source,
                                                      G_CALLBACK (show_more_comments),
                                                      self);
 
-        queue_resolve_comments (self, id, self->resolver_cancel);
+        if (tier == NULL)
+            queue_resolve_comments (self, id, self->resolver_cancel);
+
+        g_free (tier);
 
         update_tools_stack (self);
 
