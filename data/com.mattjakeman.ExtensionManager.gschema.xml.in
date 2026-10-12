@@ -20,7 +20,7 @@
       <description>Display enabled extensions first in the installed view.</description>
     </key>
     <key name="extension-repository" type="s">
-      <default>'https://shell-extension-registry-81c4e5.gitlab.io/index.json'</default>
+      <default>'https://shell-extension-registry-550115.gitlab.io/index.json'</default>
       <summary>Extension Repository</summary>
       <description>The signed index (index.json) to browse and install extensions from when GNOME Shell does not set one itself. Empty to use extensions.gnome.org.</description>
     </key>
