@@ -316,12 +316,20 @@ test_enable (void)
     g_auto (GStrv) now_disabled = NULL;
     GError *error = NULL;
 
+    // Never changed by the user: with the schema copy, the system's defaults
+    // are unknown, so nothing is written
+    g_assert_false (exm_package_enable (settings, TRUE, UUID, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+    g_clear_error (&error);
+    g_assert_null (g_settings_get_user_value (settings, "enabled-extensions"));
+    g_assert_null (g_settings_get_user_value (settings, "disabled-extensions"));
+
     g_settings_set_strv (settings, "enabled-extensions", enabled);
     g_settings_set_strv (settings, "disabled-extensions", disabled);
 
-    g_assert_true (exm_package_enable (settings, UUID, &error));
+    g_assert_true (exm_package_enable (settings, TRUE, UUID, &error));
     g_assert_no_error (error);
-    g_assert_true (exm_package_enable (settings, UUID, &error));
+    g_assert_true (exm_package_enable (settings, TRUE, UUID, &error));
 
     now_enabled = g_settings_get_strv (settings, "enabled-extensions");
     now_disabled = g_settings_get_strv (settings, "disabled-extensions");
@@ -330,6 +338,15 @@ test_enable (void)
     g_assert_cmpstr (now_enabled[1], ==, UUID);
     g_assert_cmpuint (g_strv_length (now_disabled), ==, 1);
     g_assert_cmpstr (now_disabled[0], ==, "b@x");
+
+    // With GNOME Shell's own schema the defaults are known
+    g_settings_reset (settings, "enabled-extensions");
+    g_assert_true (exm_package_enable (settings, FALSE, UUID, &error));
+    g_assert_no_error (error);
+    g_strfreev (now_enabled);
+    now_enabled = g_settings_get_strv (settings, "enabled-extensions");
+    g_assert_cmpuint (g_strv_length (now_enabled), ==, 1);
+    g_assert_cmpstr (now_enabled[0], ==, UUID);
 }
 
 /* A signed repository on the loopback interface */
