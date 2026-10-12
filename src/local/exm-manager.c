@@ -27,6 +27,8 @@
 #include "../exm-enums.h"
 #include "../web/exm-repository.h"
 
+#include <glib/gi18n.h>
+
 struct _ExmManager
 {
     GObject parent_instance;
@@ -843,8 +845,9 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
 
 /*
  * GNOME Shell installs and updates from the catalogue in its
- * extension-repository settings and exposes them as the ExtensionRepository
- * and ExtensionRepositoryKey properties. Browse the same catalogue, so what
+ * extension-repository settings, exposes them as the read-only
+ * ExtensionRepository and ExtensionRepositoryKey properties and changes them
+ * with SetExtensionRepository. Browse the same catalogue, so what
  * is shown is what the Shell installs. A Shell without these properties uses
  * extensions.gnome.org; EXM_EXTENSION_REPOSITORY and
  * EXM_EXTENSION_REPOSITORY_KEY then set a repository for testing.
@@ -905,78 +908,34 @@ update_repository (ExmManager *self)
                                    g_getenv ("EXM_EXTENSION_REPOSITORY_KEY"));
 }
 
-typedef struct
-{
-    gchar *names[2];
-    gchar *values[2];
-    guint next;
-} SetRepositoryData;
-
 static void
-set_repository_data_free (SetRepositoryData *data)
-{
-    for (guint i = 0; i < G_N_ELEMENTS (data->names); i++)
-    {
-        g_free (data->names[i]);
-        g_free (data->values[i]);
-    }
-
-    g_free (data);
-}
-
-static void set_next_repository_property (GTask *task);
-
-static void
-on_repository_property_set (GDBusConnection *connection,
-                            GAsyncResult    *res,
-                            GTask           *task)
+on_repository_set (GDBusConnection *connection,
+                   GAsyncResult    *res,
+                   GTask           *task)
 {
     g_autoptr (GVariant) reply = NULL;
     GError *error = NULL;
 
     reply = g_dbus_connection_call_finish (connection, res, &error);
 
-    if (reply == NULL)
-    {
-        g_dbus_error_strip_remote_error (error);
-        g_task_return_error (task, error);
-        g_object_unref (task);
-        return;
-    }
-
-    set_next_repository_property (task);
-}
-
-static void
-set_next_repository_property (GTask *task)
-{
-    ExmManager *self = g_task_get_source_object (task);
-    SetRepositoryData *data = g_task_get_task_data (task);
-    GDBusProxy *proxy = G_DBUS_PROXY (self->proxy);
-    guint i = data->next++;
-
-    if (i == G_N_ELEMENTS (data->names))
+    if (reply != NULL)
     {
         g_task_return_boolean (task, TRUE);
-        g_object_unref (task);
-        return;
+    }
+    else if (g_error_matches (error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD))
+    {
+        g_clear_error (&error);
+        g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                 _("This version of GNOME Shell cannot use an extension repository"));
+    }
+    else
+    {
+        // The Shell explains what it refused, e.g. a URL that is not HTTPS
+        g_dbus_error_strip_remote_error (error);
+        g_task_return_error (task, error);
     }
 
-    g_dbus_connection_call (g_dbus_proxy_get_connection (proxy),
-                            g_dbus_proxy_get_name (proxy),
-                            g_dbus_proxy_get_object_path (proxy),
-                            "org.freedesktop.DBus.Properties",
-                            "Set",
-                            g_variant_new ("(ssv)",
-                                           g_dbus_proxy_get_interface_name (proxy),
-                                           data->names[i],
-                                           g_variant_new_string (data->values[i])),
-                            NULL,
-                            G_DBUS_CALL_FLAGS_NONE,
-                            -1,
-                            g_task_get_cancellable (task),
-                            (GAsyncReadyCallback) on_repository_property_set,
-                            task);
+    g_object_unref (task);
 }
 
 /**
@@ -984,9 +943,8 @@ set_next_repository_property (GTask *task)
  * @url: the index URL, or "" for extensions.gnome.org
  * @public_key: the key that signs the index, or ""
  *
- * Sets the repository the Shell installs and updates from. The Shell needs a
- * key whenever a URL is set, so the key is written first when setting a
- * repository and last when clearing it.
+ * Sets the repository the Shell installs and updates from. The Shell checks
+ * both and changes them together.
  */
 void
 exm_manager_set_repository_async (ExmManager          *self,
@@ -997,17 +955,20 @@ exm_manager_set_repository_async (ExmManager          *self,
                                   gpointer             user_data)
 {
     GTask *task = g_task_new (self, cancellable, callback, user_data);
-    SetRepositoryData *data = g_new0 (SetRepositoryData, 1);
-    gboolean clearing = url == NULL || *url == '\0';
-    guint url_index = clearing ? 0 : 1;
+    GDBusProxy *proxy = G_DBUS_PROXY (self->proxy);
 
-    data->names[url_index] = g_strdup (REPOSITORY_PROPERTY);
-    data->values[url_index] = g_strdup (url ? url : "");
-    data->names[1 - url_index] = g_strdup (REPOSITORY_KEY_PROPERTY);
-    data->values[1 - url_index] = g_strdup (public_key ? public_key : "");
-    g_task_set_task_data (task, data, (GDestroyNotify) set_repository_data_free);
-
-    set_next_repository_property (task);
+    g_dbus_connection_call (g_dbus_proxy_get_connection (proxy),
+                            g_dbus_proxy_get_name (proxy),
+                            g_dbus_proxy_get_object_path (proxy),
+                            g_dbus_proxy_get_interface_name (proxy),
+                            "SetExtensionRepository",
+                            g_variant_new ("(ss)", url ? url : "", public_key ? public_key : ""),
+                            G_VARIANT_TYPE_UNIT,
+                            G_DBUS_CALL_FLAGS_NONE,
+                            -1,
+                            cancellable,
+                            (GAsyncReadyCallback) on_repository_set,
+                            task);
 }
 
 gboolean
