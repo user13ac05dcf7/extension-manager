@@ -248,7 +248,7 @@ test_own_settings (void)
     // A stock Shell has no repository; the application's default is used
     g_assert_cmpint (exm_repository_choose_source (NULL, NULL, settings, &url, &key),
                      ==, EXM_REPOSITORY_ORIGIN_SETTINGS);
-    g_assert_cmpstr (url, ==, "https://shell-extension-registry-81c4e5.gitlab.io/index.json");
+    g_assert_cmpstr (url, ==, "https://shell-extension-registry-550115.gitlab.io/index.json");
     g_assert_cmpstr (key, ==, "37rwPeZLAvu/3PO70cbnr6trHwutr7SetPnOkCNm5/g=");
     g_assert_true (exm_repository_check_source (url, key, NULL));
     g_clear_pointer (&url, g_free);
