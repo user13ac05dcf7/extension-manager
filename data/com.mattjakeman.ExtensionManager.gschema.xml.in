@@ -19,5 +19,15 @@
       <summary>Sort Enabled First</summary>
       <description>Display enabled extensions first in the installed view.</description>
     </key>
+    <key name="extension-repository" type="s">
+      <default>'https://shell-extension-registry-81c4e5.gitlab.io/index.json'</default>
+      <summary>Extension Repository</summary>
+      <description>The signed index (index.json) to browse and install extensions from when GNOME Shell does not set one itself. Empty to use extensions.gnome.org.</description>
+    </key>
+    <key name="extension-repository-key" type="s">
+      <default>'37rwPeZLAvu/3PO70cbnr6trHwutr7SetPnOkCNm5/g='</default>
+      <summary>Extension Repository Key</summary>
+      <description>The Ed25519 public key (base64 of the raw 32 bytes) that signs the extension repository's index.</description>
+    </key>
   </schema>
 </schemalist>

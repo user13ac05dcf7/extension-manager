@@ -7,9 +7,8 @@ template $ExmRepositoryDialog: Adw.PreferencesDialog {
   content-height: 480;
 
   Adw.PreferencesPage {
-    Adw.PreferencesGroup {
+    Adw.PreferencesGroup group {
       title: _("Extension Repository");
-      description: _("GNOME Shell installs and updates extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below.");
 
       Adw.EntryRow url_row {
         title: _("Index URL");
@@ -40,6 +39,13 @@ template $ExmRepositoryDialog: Adw.PreferencesDialog {
         orientation: horizontal;
         spacing: 12;
         halign: end;
+
+        Gtk.Button restore_button {
+          label: _("_Restore Default");
+          use-underline: true;
+          visible: false;
+          clicked => $on_restore() swapped;
+        }
 
         Gtk.Button default_button {
           label: _("Use extensions.gnome.org");

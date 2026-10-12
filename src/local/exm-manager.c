@@ -21,6 +21,8 @@
 
 #include "exm-manager.h"
 
+#include "exm-config.h"
+#include "exm-package.h"
 #include "shell-dbus-interface.h"
 
 #include "../exm-types.h"
@@ -35,6 +37,7 @@ struct _ExmManager
 
     ShellExtensions *proxy;
     GListModel *ext_model;
+    GSettings *settings;
 
     const gchar *shell_version;
     gboolean extensions_enabled;
@@ -61,6 +64,7 @@ enum {
     SIGNAL_UPDATES_AVAILABLE,
     SIGNAL_ERROR_OCCURRED,
     SIGNAL_INSTALL_STATUS,
+    SIGNAL_LOGOUT_REQUIRED,
     N_SIGNALS
 };
 
@@ -361,6 +365,129 @@ exm_manager_is_installed_uuid (ExmManager  *self,
     return FALSE;
 }
 
+static void
+on_remote_installed (ShellExtensions *proxy,
+                     GAsyncResult    *res,
+                     GTask           *task)
+{
+    g_autofree gchar *out_result = NULL;
+    GError *error = NULL;
+
+    if (!shell_extensions_call_install_remote_extension_finish (proxy, &out_result, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, g_strcmp0 (out_result, "cancelled") != 0);
+
+    g_object_unref (task);
+}
+
+static void
+install_remote (ExmManager *self,
+                GTask      *task)
+{
+    shell_extensions_call_install_remote_extension (self->proxy,
+                                                    g_task_get_task_data (task),
+                                                    g_task_get_cancellable (task),
+                                                    (GAsyncReadyCallback) on_remote_installed,
+                                                    task);
+}
+
+static void
+on_package_installed (GObject      *source G_GNUC_UNUSED,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    ExmManager *self = g_task_get_source_object (task);
+    const gchar *uuid = g_task_get_task_data (task);
+    g_autoptr (GSettings) shell_settings = NULL;
+    GError *error = NULL;
+    gboolean staged;
+
+    if (!exm_package_install_finish (res, &staged, &error))
+    {
+        notify_error (self, "Could not install extension '%s': %s\n", uuid, error->message);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    // An update replaces the installed version at login and stays enabled
+    if (!staged)
+    {
+        shell_settings = exm_package_get_shell_settings (&error);
+
+        if (shell_settings == NULL || !exm_package_enable (shell_settings, uuid, &error))
+        {
+            notify_error (self, "Extension '%s' is installed, but could not be enabled: %s\n",
+                          uuid, error->message);
+            g_clear_error (&error);
+        }
+    }
+
+    g_signal_emit (self, signals [SIGNAL_LOGOUT_REQUIRED], 0, uuid);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+on_package_found (ExmRepository *repository,
+                  GAsyncResult  *res,
+                  GTask         *task)
+{
+    ExmManager *self = g_task_get_source_object (task);
+    const gchar *uuid = g_task_get_task_data (task);
+    g_autoptr (JsonNode) entry = NULL;
+    g_autofree gchar *index_url = NULL;
+    g_autofree gchar *url = NULL;
+    g_autofree gchar *sha256 = NULL;
+    g_autofree gchar *shell_dir = NULL;
+    JsonObject *extension;
+    const gchar *tier;
+    GError *error = NULL;
+    gint64 size;
+
+    entry = exm_repository_lookup_finish (repository, res, &index_url, &error);
+    if (entry == NULL)
+        goto failed;
+
+    extension = json_node_get_object (entry);
+    tier = json_object_get_string_member_with_default (extension, "tier", NULL);
+
+    // Mirrored releases are the ones on extensions.gnome.org, which the Shell
+    // installs, loads at once and keeps updated
+    if (g_strcmp0 (tier, "ego-mirror") == 0)
+    {
+        install_remote (self, task);
+        return;
+    }
+
+    if (!exm_repository_get_download (extension, index_url, self->shell_version,
+                                      &url, &sha256, &size, &error))
+        goto failed;
+
+    shell_dir = exm_package_get_shell_dir ();
+    exm_package_install_async (uuid, url, sha256, size, self->shell_version, shell_dir,
+                               g_task_get_cancellable (task),
+                               (GAsyncReadyCallback) on_package_installed, task);
+    return;
+
+failed:
+    notify_error (self, "Could not install extension '%s': %s\n", uuid, error->message);
+    g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+/**
+ * exm_manager_install_async:
+ * @uuid: the extension to install
+ *
+ * GNOME Shell installs from its own repository, or from
+ * extensions.gnome.org. With a repository of Extension Manager's own,
+ * releases it mirrors from extensions.gnome.org are still installed by the
+ * Shell; the others are installed by Extension Manager and start after the
+ * next login, which "logout-required" announces.
+ */
 void
 exm_manager_install_async (ExmManager          *self,
                            const gchar         *uuid,
@@ -368,34 +495,35 @@ exm_manager_install_async (ExmManager          *self,
                            GAsyncReadyCallback  callback,
                            gpointer             user_data)
 {
-    shell_extensions_call_install_remote_extension (self->proxy,
-                                                    uuid,
-                                                    cancellable,
-                                                    callback,
-                                                    user_data);
+    GTask *task = g_task_new (self, cancellable, callback, user_data);
+    ExmRepository *repository = exm_repository_get_default ();
+
+    g_task_set_task_data (task, g_strdup (uuid), g_free);
+
+    if (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL &&
+        exm_repository_is_enabled (repository))
+    {
+        exm_repository_lookup_async (repository, uuid, cancellable,
+                                     (GAsyncReadyCallback) on_package_found, task);
+        return;
+    }
+
+    install_remote (self, task);
 }
 
+/**
+ * exm_manager_install_finish:
+ *
+ * Returns: %TRUE if installed, %FALSE if it failed or the user cancelled
+ */
 gboolean
-exm_manager_install_finish (GObject       *self,
+exm_manager_install_finish (ExmManager    *self,
                             GAsyncResult  *result,
                             GError       **error)
 {
-    gchar *out_result = NULL;
-    gboolean success;
+    g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
 
-    g_return_val_if_fail (SHELL_IS_EXTENSIONS (self), FALSE);
-
-    success = shell_extensions_call_install_remote_extension_finish (SHELL_EXTENSIONS (self),
-                                                                     &out_result,
-                                                                     result,
-                                                                     error);
-
-    if (g_strcmp0 (out_result, "cancelled") == 0)
-        success = FALSE;
-
-    g_free (out_result);
-
-    return success;
+    return g_task_propagate_boolean (G_TASK (result), error);
 }
 
 static int
@@ -535,6 +663,16 @@ exm_manager_class_init (ExmManagerClass *klass)
                         0, NULL, NULL, NULL,
                         G_TYPE_NONE, 1,
                         EXM_TYPE_INSTALL_BUTTON_STATE);
+
+    /* An extension was installed or updated that GNOME Shell only starts
+     * after the user logs out and back in */
+    signals [SIGNAL_LOGOUT_REQUIRED]
+        = g_signal_new ("logout-required",
+                        G_TYPE_FROM_CLASS (object_class),
+                        G_SIGNAL_RUN_LAST|G_SIGNAL_NO_RECURSE|G_SIGNAL_NO_HOOKS,
+                        0, NULL, NULL, NULL,
+                        G_TYPE_NONE, 1,
+                        G_TYPE_STRING);
 }
 
 static void
@@ -847,10 +985,11 @@ on_state_changed (ShellExtensions *object G_GNUC_UNUSED,
  * GNOME Shell installs and updates from the catalogue in its
  * extension-repository settings, exposes them as the read-only
  * ExtensionRepository and ExtensionRepositoryKey properties and changes them
- * with SetExtensionRepository. Browse the same catalogue, so what
- * is shown is what the Shell installs. A Shell without these properties uses
- * extensions.gnome.org; EXM_EXTENSION_REPOSITORY and
- * EXM_EXTENSION_REPOSITORY_KEY then set a repository for testing.
+ * with SetExtensionRepository. Browse the same catalogue, so what is shown is
+ * what the Shell installs. A Shell without these properties installs from
+ * extensions.gnome.org; the repository then comes from the application's
+ * own settings (or EXM_EXTENSION_REPOSITORY and EXM_EXTENSION_REPOSITORY_KEY,
+ * for testing), and Extension Manager installs what the Shell cannot.
  */
 #define REPOSITORY_PROPERTY "ExtensionRepository"
 #define REPOSITORY_KEY_PROPERTY "ExtensionRepositoryKey"
@@ -860,6 +999,9 @@ get_string_property (ExmManager  *self,
                      const gchar *name)
 {
     g_autoptr (GVariant) value = NULL;
+
+    if (self->proxy == NULL)
+        return NULL;
 
     value = g_dbus_proxy_get_cached_property (G_DBUS_PROXY (self->proxy), name);
 
@@ -871,27 +1013,32 @@ get_string_property (ExmManager  *self,
 
 /**
  * exm_manager_get_repository:
- * @url: (out) (optional): the repository the Shell uses, empty for
+ * @url: (out) (optional): the repository in use, empty for
  *   extensions.gnome.org
  * @public_key: (out) (optional): the key that signs its index
  *
- * Returns: whether the Shell supports extension repositories
+ * Returns: where the repository comes from
  */
-gboolean
+ExmRepositoryOrigin
 exm_manager_get_repository (ExmManager  *self,
                             gchar      **url,
                             gchar      **public_key)
 {
     g_autofree gchar *shell_url = get_string_property (self, REPOSITORY_PROPERTY);
     g_autofree gchar *shell_key = get_string_property (self, REPOSITORY_KEY_PROPERTY);
-    gboolean supported = shell_url != NULL && shell_key != NULL;
+    g_autofree gchar *chosen_url = NULL;
+    g_autofree gchar *chosen_key = NULL;
+    ExmRepositoryOrigin origin;
+
+    origin = exm_repository_choose_source (shell_url, shell_key, self->settings,
+                                           &chosen_url, &chosen_key);
 
     if (url)
-        *url = g_strdup (supported ? shell_url : "");
+        *url = g_steal_pointer (&chosen_url);
     if (public_key)
-        *public_key = g_strdup (supported ? shell_key : "");
+        *public_key = g_steal_pointer (&chosen_key);
 
-    return supported;
+    return origin;
 }
 
 static void
@@ -900,12 +1047,16 @@ update_repository (ExmManager *self)
     g_autofree gchar *url = NULL;
     g_autofree gchar *key = NULL;
 
-    if (exm_manager_get_repository (self, &url, &key))
-        exm_repository_set_source (exm_repository_get_default (), url, key);
-    else
-        exm_repository_set_source (exm_repository_get_default (),
-                                   g_getenv ("EXM_EXTENSION_REPOSITORY"),
-                                   g_getenv ("EXM_EXTENSION_REPOSITORY_KEY"));
+    exm_manager_get_repository (self, &url, &key);
+    exm_repository_set_source (exm_repository_get_default (), url, key);
+}
+
+static void
+on_settings_changed (ExmManager  *self,
+                     const gchar *key)
+{
+    if (g_str_has_prefix (key, "extension-repository"))
+        update_repository (self);
 }
 
 static void
@@ -943,8 +1094,9 @@ on_repository_set (GDBusConnection *connection,
  * @url: the index URL, or "" for extensions.gnome.org
  * @public_key: the key that signs the index, or ""
  *
- * Sets the repository the Shell installs and updates from. The Shell checks
- * both and changes them together.
+ * Sets the repository the Shell installs and updates from when it has one,
+ * and the application's own otherwise. Both are checked and changed
+ * together.
  */
 void
 exm_manager_set_repository_async (ExmManager          *self,
@@ -956,6 +1108,18 @@ exm_manager_set_repository_async (ExmManager          *self,
 {
     GTask *task = g_task_new (self, cancellable, callback, user_data);
     GDBusProxy *proxy = G_DBUS_PROXY (self->proxy);
+    GError *error = NULL;
+
+    if (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL)
+    {
+        if (exm_repository_store_source (self->settings, url, public_key, &error))
+            g_task_return_boolean (task, TRUE);
+        else
+            g_task_return_error (task, error);
+
+        g_object_unref (task);
+        return;
+    }
 
     g_dbus_connection_call (g_dbus_proxy_get_connection (proxy),
                             g_dbus_proxy_get_name (proxy),
@@ -979,6 +1143,26 @@ exm_manager_set_repository_finish (ExmManager    *self,
     g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
 
     return g_task_propagate_boolean (G_TASK (result), error);
+}
+
+/**
+ * exm_manager_reset_repository:
+ *
+ * Goes back to the repository the application comes with. Only for its own
+ * settings; a Shell with a repository keeps its own.
+ */
+void
+exm_manager_reset_repository (ExmManager *self)
+{
+    g_autoptr (GSettings) batch = NULL;
+
+    g_return_if_fail (exm_manager_get_repository (self, NULL, NULL) != EXM_REPOSITORY_ORIGIN_SHELL);
+
+    batch = g_settings_new (APP_ID);
+    g_settings_delay (batch);
+    g_settings_reset (batch, "extension-repository");
+    g_settings_reset (batch, "extension-repository-key");
+    g_settings_apply (batch);
 }
 
 static void
@@ -1005,6 +1189,10 @@ exm_manager_init (ExmManager *self)
 {
     GError *error = NULL;
 
+    self->settings = g_settings_new (APP_ID);
+    g_signal_connect_swapped (self->settings, "changed",
+                              G_CALLBACK (on_settings_changed), self);
+
     self->proxy = shell_extensions_proxy_new_for_bus_sync (G_BUS_TYPE_SESSION,
                                                            G_DBUS_PROXY_FLAGS_NONE,
                                                            "org.gnome.Shell.Extensions",
@@ -1014,6 +1202,7 @@ exm_manager_init (ExmManager *self)
     if (error != NULL)
     {
         notify_error (self, "Could not create proxy: %s\n", error->message);
+        update_repository (self);
         return;
     }
 

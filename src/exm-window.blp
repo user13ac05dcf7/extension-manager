@@ -230,3 +230,15 @@ Adw.AlertDialog unsupported_dialog {
     back: _("_Go Back") suggested,
   ]
 }
+
+Adw.AlertDialog logout_dialog {
+  heading: _("Log Out to Finish Installing");
+  body: _("GNOME Shell loads extensions installed or updated from the extension repository after you log out and log back in.");
+  default-response: "logout";
+  close-response: "later";
+
+  responses [
+    later: _("_Later"),
+    logout: _("_Log Out") suggested,
+  ]
+}

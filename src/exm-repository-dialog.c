@@ -32,9 +32,11 @@ struct _ExmRepositoryDialog
 
     ExmManager *manager;
 
+    AdwPreferencesGroup *group;
     AdwEntryRow *url_row;
     AdwEntryRow *key_row;
     GtkLabel *error_label;
+    GtkButton *restore_button;
     GtkButton *default_button;
     GtkButton *apply_button;
 };
@@ -71,6 +73,7 @@ set_busy (ExmRepositoryDialog *self,
 {
     gtk_widget_set_sensitive (GTK_WIDGET (self->url_row), !busy);
     gtk_widget_set_sensitive (GTK_WIDGET (self->key_row), !busy);
+    gtk_widget_set_sensitive (GTK_WIDGET (self->restore_button), !busy);
     gtk_widget_set_sensitive (GTK_WIDGET (self->default_button), !busy);
     gtk_widget_set_sensitive (GTK_WIDGET (self->apply_button), !busy);
 }
@@ -80,17 +83,30 @@ load_repository (ExmRepositoryDialog *self)
 {
     g_autofree gchar *url = NULL;
     g_autofree gchar *key = NULL;
+    ExmRepositoryOrigin origin;
 
-    if (!exm_manager_get_repository (self->manager, &url, &key))
-    {
-        set_busy (self, TRUE);
-        show_error (self, _("This version of GNOME Shell cannot use an extension repository"));
-        return;
-    }
+    origin = exm_manager_get_repository (self->manager, &url, &key);
 
     gtk_editable_set_text (GTK_EDITABLE (self->url_row), url);
     gtk_editable_set_text (GTK_EDITABLE (self->key_row), key);
     show_error (self, NULL);
+
+    if (origin == EXM_REPOSITORY_ORIGIN_SHELL)
+    {
+        adw_preferences_group_set_description (self->group,
+                                               _("GNOME Shell installs and updates extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below."));
+        return;
+    }
+
+    adw_preferences_group_set_description (self->group,
+                                           _("Extension Manager shows extensions from this repository instead of extensions.gnome.org. Its index must be signed with the key below. Extensions reviewed by extensions.gnome.org are installed from there by GNOME Shell; others start after you log out and log back in."));
+    gtk_widget_set_visible (GTK_WIDGET (self->restore_button), TRUE);
+
+    if (origin == EXM_REPOSITORY_ORIGIN_ENVIRONMENT)
+    {
+        set_busy (self, TRUE);
+        show_error (self, _("The repository is set by EXM_EXTENSION_REPOSITORY"));
+    }
 }
 
 static void
@@ -161,6 +177,13 @@ static void
 on_use_default (ExmRepositoryDialog *self)
 {
     set_repository (self, "", "");
+}
+
+static void
+on_restore (ExmRepositoryDialog *self)
+{
+    exm_manager_reset_repository (self->manager);
+    adw_dialog_close (ADW_DIALOG (self));
 }
 
 static void
@@ -247,14 +270,17 @@ exm_repository_dialog_class_init (ExmRepositoryDialogClass *klass)
 
     gtk_widget_class_set_template_from_resource (widget_class, g_strdup_printf ("%s/exm-repository-dialog.ui", RESOURCE_PATH));
 
+    gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, group);
     gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, url_row);
     gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, key_row);
     gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, error_label);
+    gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, restore_button);
     gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, default_button);
     gtk_widget_class_bind_template_child (widget_class, ExmRepositoryDialog, apply_button);
 
     gtk_widget_class_bind_template_callback (widget_class, on_apply);
     gtk_widget_class_bind_template_callback (widget_class, on_use_default);
+    gtk_widget_class_bind_template_callback (widget_class, on_restore);
     gtk_widget_class_bind_template_callback (widget_class, on_changed);
 }
 

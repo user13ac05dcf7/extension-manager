@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The two GNOME Shell settings Extension Manager changes when it installs an
+  extension the Shell has not loaded yet. Used only where GNOME Shell's own
+  schemas are missing, as in the Flatpak sandbox; types and path must match
+  org.gnome.shell.
+-->
+<schemalist>
+  <schema id="org.gnome.shell" path="/org/gnome/shell/">
+    <key name="enabled-extensions" type="as">
+      <default>[]</default>
+      <summary>UUIDs of extensions to enable</summary>
+    </key>
+    <key name="disabled-extensions" type="as">
+      <default>[]</default>
+      <summary>UUIDs of extensions to force disabling</summary>
+    </key>
+  </schema>
+</schemalist>

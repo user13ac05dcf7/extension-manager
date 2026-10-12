@@ -30,6 +30,8 @@ config_h.set_quoted('APP_ID', app_id)
 config_h.set_quoted('PKG_NAME', get_option('package'))
 config_h.set_quoted('PKG_DISTRIBUTOR', get_option('distributor'))
 config_h.set10('IS_OFFICIAL', get_option('official'))
+shell_schema_dir = join_paths(get_option('prefix'), get_option('datadir'), 'extension-manager', 'schemas')
+config_h.set_quoted('SHELL_SCHEMA_DIR', shell_schema_dir)
 config_h.set10('WITH_BACKTRACE', get_option('backtrace'))
 configure_file(
   output: 'exm-config.h',

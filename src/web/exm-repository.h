@@ -30,7 +30,27 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE (ExmRepository, exm_repository, EXM, REPOSITORY, GObject)
 
+typedef enum
+{
+    EXM_REPOSITORY_ORIGIN_SHELL,
+    EXM_REPOSITORY_ORIGIN_ENVIRONMENT,
+    EXM_REPOSITORY_ORIGIN_SETTINGS,
+} ExmRepositoryOrigin;
+
 ExmRepository *exm_repository_get_default (void);
+
+ExmRepositoryOrigin
+exm_repository_choose_source (const gchar  *shell_url,
+                              const gchar  *shell_key,
+                              GSettings    *settings,
+                              gchar       **url,
+                              gchar       **public_key);
+
+gboolean
+exm_repository_store_source (GSettings    *settings,
+                             const gchar  *url,
+                             const gchar  *public_key,
+                             GError      **error);
 
 void
 exm_repository_set_source (ExmRepository *self,
@@ -44,6 +64,11 @@ exm_repository_check_url (const gchar  *url,
 gboolean
 exm_repository_check_key (const gchar  *public_key,
                           GError      **error);
+
+gboolean
+exm_repository_check_source (const gchar  *url,
+                             const gchar  *public_key,
+                             GError      **error);
 
 gboolean
 exm_repository_is_enabled (ExmRepository *self);
@@ -64,6 +89,32 @@ exm_repository_request_finish (ExmRepository  *self,
                                GAsyncResult   *result,
                                GError        **error);
 
+void
+exm_repository_lookup_async (ExmRepository       *self,
+                             const gchar         *uuid,
+                             GCancellable        *cancellable,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data);
+
+JsonNode *
+exm_repository_lookup_finish (ExmRepository  *self,
+                              GAsyncResult   *result,
+                              gchar         **index_url,
+                              GError        **error);
+
+gboolean
+exm_repository_get_download (JsonObject   *extension,
+                             const gchar  *index_url,
+                             const gchar  *shell_version,
+                             gchar       **url,
+                             gchar       **sha256,
+                             gint64       *size,
+                             GError      **error);
+
+gboolean
+exm_repository_is_shell_compatible (JsonArray   *versions,
+                                    const gchar *shell_version);
+
 /* The steps below are separate so they can be tested without a network. */
 
 gboolean
@@ -78,6 +129,11 @@ exm_repository_parse_index (GBytes   *bytes,
                             gint64    last_serial,
                             gint64   *serial,
                             GError  **error);
+
+JsonObject *
+exm_repository_find_package (JsonObject   *index,
+                             const gchar  *uuid,
+                             GError      **error);
 
 GBytes *
 exm_repository_answer (JsonObject   *index,
