@@ -47,13 +47,18 @@ struct _ExmInstalledPage
     GtkFilterListModel *search_list_model;
     GListModel *system_filtered_model;
 
+    GtkStringFilter *search_filter;
+    guint search_list_model_signal_id;
+
     gboolean sort_enabled_first;
     gboolean search_mode_enabled;
-    const char *search_query;
+    char *search_query;
+    GListModel *bound_model;
     guint signal_id;
 
     gboolean selection_mode;
     guint n_selected;
+    GHashTable *selected_uuids;
 };
 
 G_DEFINE_FINAL_TYPE (ExmInstalledPage, exm_installed_page, GTK_TYPE_WIDGET)
@@ -81,6 +86,13 @@ static void
 propagate_selection_mode (ExmInstalledPage *self);
 
 static void
+update_n_selected (ExmInstalledPage *self);
+
+static void
+sync_row_selected (ExmExtensionRow *row,
+                   gpointer         user_data);
+
+static void
 update_system_group_visibility (ExmInstalledPage *self);
 
 ExmInstalledPage *
@@ -99,6 +111,15 @@ exm_installed_page_finalize (GObject *object)
     gtk_widget_unparent (child);
 
     g_clear_object (&self->system_filtered_model);
+    g_clear_object (&self->search_filter);
+    g_clear_object (&self->search_list_model);
+    g_clear_pointer (&self->search_query, g_free);
+    g_clear_pointer (&self->selected_uuids, g_hash_table_unref);
+
+    if (self->bound_model != NULL && self->signal_id > 0)
+        g_signal_handler_disconnect (self->bound_model, self->signal_id);
+    self->signal_id = 0;
+    g_clear_object (&self->bound_model);
 
     G_OBJECT_CLASS (exm_installed_page_parent_class)->finalize (object);
 }
@@ -152,14 +173,15 @@ exm_installed_page_set_property (GObject      *object,
         switch_page (self);
         break;
     case PROP_SEARCH_QUERY:
+        g_free (self->search_query);
         self->search_query = g_value_dup_string (value);
         break;
     case PROP_SELECTION_MODE:
         self->selection_mode = g_value_get_boolean (value);
-        if (!self->selection_mode && self->n_selected != 0)
+        if (!self->selection_mode)
         {
-            self->n_selected = 0;
-            g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_N_SELECTED]);
+            g_hash_table_remove_all (self->selected_uuids);
+            update_n_selected (self);
         }
         propagate_selection_mode (self);
         update_system_group_visibility (self);
@@ -180,6 +202,7 @@ widget_factory (ExmExtension     *extension,
 
     row = exm_extension_row_new (extension, self->manager);
     g_object_set (row, "selection-mode", self->selection_mode, NULL);
+    sync_row_selected (row, self);
 
     return GTK_WIDGET (row);
 }
@@ -214,11 +237,12 @@ compare_enabled (ExmExtension *this,
 static void
 on_search_changed (ExmInstalledPage *self,
                    GParamSpec       *pspec G_GNUC_UNUSED,
-                   gpointer          user_data)
+                   gpointer          user_data G_GNUC_UNUSED)
 {
-    GtkStringFilter *search_filter = GTK_STRING_FILTER (user_data);
+    if (self->search_filter == NULL)
+        return;
 
-    gtk_string_filter_set_search (search_filter, self->search_query);
+    gtk_string_filter_set_search (self->search_filter, self->search_query);
 }
 
 static void
@@ -272,8 +296,13 @@ bind_list_box (GListModel       *model,
 
     g_return_if_fail (G_IS_LIST_MODEL (model));
 
+    if (self->search_list_model != NULL && self->search_list_model_signal_id > 0)
+        g_signal_handler_disconnect (self->search_list_model, self->search_list_model_signal_id);
+    self->search_list_model_signal_id = 0;
+    g_clear_object (&self->search_list_model);
+
     // Sort alphabetically
-    expression = gtk_property_expression_new (EXM_TYPE_EXTENSION, NULL, "name");
+    expression = gtk_expression_ref (gtk_property_expression_new (EXM_TYPE_EXTENSION, NULL, "name"));
     alphabetical_sorter = gtk_string_sorter_new (expression);
 
     if (self->sort_enabled_first)
@@ -296,16 +325,17 @@ bind_list_box (GListModel       *model,
     }
 
     search_filter = gtk_string_filter_new (expression);
-    self->search_list_model = gtk_filter_list_model_new (G_LIST_MODEL (sorted_model), GTK_FILTER (search_filter));
+    g_set_object (&self->search_filter, search_filter);
+    self->search_list_model = gtk_filter_list_model_new (g_object_ref (G_LIST_MODEL (sorted_model)), GTK_FILTER (search_filter));
 
     adw_preferences_group_bind_model (self->search_prefs_group, G_LIST_MODEL (self->search_list_model),
                                       (GtkListBoxCreateWidgetFunc) widget_factory,
                                       self, NULL);
 
     // Filter by user/system extension
-    expression = gtk_property_expression_new (EXM_TYPE_EXTENSION, NULL, "is-user");
+    expression = gtk_expression_ref (gtk_property_expression_new (EXM_TYPE_EXTENSION, NULL, "is-user"));
     is_user_filter = gtk_bool_filter_new (expression);
-    filtered_model = gtk_filter_list_model_new (G_LIST_MODEL (sorted_model), GTK_FILTER (is_user_filter));
+    filtered_model = gtk_filter_list_model_new (g_object_ref (G_LIST_MODEL (sorted_model)), GTK_FILTER (is_user_filter));
 
     g_object_bind_property (filtered_model, "n-items",
                             self->user_prefs_group, "visible",
@@ -314,10 +344,15 @@ bind_list_box (GListModel       *model,
     adw_preferences_group_bind_model (self->user_prefs_group, G_LIST_MODEL (filtered_model),
                                       (GtkListBoxCreateWidgetFunc) widget_factory,
                                       self, NULL);
+    g_object_unref (filtered_model);
 
     is_user_filter = gtk_bool_filter_new (expression);
     gtk_bool_filter_set_invert (is_user_filter, TRUE);
     filtered_model = gtk_filter_list_model_new (G_LIST_MODEL (sorted_model), GTK_FILTER (is_user_filter));
+
+    if (self->system_filtered_model != NULL)
+        g_signal_handlers_disconnect_by_func (self->system_filtered_model,
+                                              update_system_group_visibility, self);
 
     g_set_object (&self->system_filtered_model, G_LIST_MODEL (filtered_model));
     g_signal_connect_swapped (self->system_filtered_model, "notify::n-items",
@@ -327,20 +362,16 @@ bind_list_box (GListModel       *model,
     adw_preferences_group_bind_model (self->system_prefs_group, G_LIST_MODEL (filtered_model),
                                       (GtkListBoxCreateWidgetFunc) widget_factory,
                                       self, NULL);
+    g_object_unref (filtered_model);
 
     // Refilter when sort-enabled-first changes and there is an ongoing search
     if (self->search_query)
         gtk_string_filter_set_search (search_filter, self->search_query);
 
-    g_signal_connect (self,
-                      "notify::search-query",
-                      G_CALLBACK (on_search_changed),
-                      search_filter);
-
-    g_signal_connect (self->search_list_model,
-                      "notify::n-items",
-                      G_CALLBACK (on_visible_stack_changed),
-                      self);
+    self->search_list_model_signal_id = g_signal_connect (self->search_list_model,
+                                                           "notify::n-items",
+                                                           G_CALLBACK (on_visible_stack_changed),
+                                                           self);
 }
 
 static guint
@@ -399,12 +430,31 @@ focus_matching_extension (AdwPreferencesGroup *prefs_group,
 }
 
 static void
+prune_selection (ExmInstalledPage *self)
+{
+    GHashTableIter iter;
+    gpointer key;
+
+    g_hash_table_iter_init (&iter, self->selected_uuids);
+    while (g_hash_table_iter_next (&iter, &key, NULL))
+    {
+        if (!exm_manager_is_installed_uuid (self->manager, (const char *) key))
+            g_hash_table_iter_remove (&iter);
+    }
+
+    update_n_selected (self);
+}
+
+static void
 on_extensions_changed (GListModel       *model,
                        guint             position,
                        guint             removed,
                        guint             added,
                        ExmInstalledPage *self)
 {
+    if (removed > added && g_hash_table_size (self->selected_uuids) > 0)
+        prune_selection (self);
+
     if (!self->sort_enabled_first || (removed > 0 && added > 0))
         return;
 
@@ -463,11 +513,13 @@ invalidate_model_bindings (ExmInstalledPage *self)
 
     if (ext_model)
     {
-        bind_list_box (ext_model, self);
+        bind_list_box (g_object_ref (ext_model), self);
 
-        if (self->signal_id > 0)
-            g_signal_handler_disconnect (ext_model, self->signal_id);
+        if (self->bound_model != NULL && self->signal_id > 0)
+            g_signal_handler_disconnect (self->bound_model, self->signal_id);
+        g_clear_object (&self->bound_model);
 
+        self->bound_model = ext_model;
         self->signal_id = g_signal_connect (ext_model,
                                             "items-changed",
                                             G_CALLBACK (on_extensions_changed),
@@ -502,33 +554,11 @@ propagate_selection_mode (ExmInstalledPage *self)
     foreach_extension_row (self->search_prefs_group, set_row_selection_mode, mode);
 }
 
-static guint
-count_selected_rows (ExmInstalledPage *self)
-{
-    guint count = 0;
-    guint i;
-    ExmExtensionRow *row;
-    AdwPreferencesGroup *groups[] = {
-        self->user_prefs_group,
-        self->search_prefs_group,
-    };
-
-    for (guint g = 0; g < G_N_ELEMENTS (groups); g++)
-    {
-        i = 0;
-        while ((row = EXM_EXTENSION_ROW (adw_preferences_group_get_row (groups[g], i++))) != NULL)
-            if (exm_extension_row_is_selected (row))
-                count++;
-    }
-    return count;
-}
-
 static void
-on_page_selection_changed (GSimpleAction    *action G_GNUC_UNUSED,
-                           GVariant         *param G_GNUC_UNUSED,
-                           ExmInstalledPage *self)
+update_n_selected (ExmInstalledPage *self)
 {
-    guint count = count_selected_rows (self);
+    guint count = g_hash_table_size (self->selected_uuids);
+
     if (count != self->n_selected)
     {
         self->n_selected = count;
@@ -536,55 +566,79 @@ on_page_selection_changed (GSimpleAction    *action G_GNUC_UNUSED,
     }
 }
 
+static void
+sync_row_selected (ExmExtensionRow *row,
+                   gpointer         user_data)
+{
+    ExmInstalledPage *self = EXM_INSTALLED_PAGE (user_data);
+    ExmExtension *ext = NULL;
+    gchar *uuid = NULL;
+    gboolean selected;
+
+    g_object_get (row, "extension", &ext, NULL);
+    if (!ext)
+        return;
+    g_object_get (ext, "uuid", &uuid, NULL);
+    g_object_unref (ext);
+
+    selected = uuid != NULL && g_hash_table_contains (self->selected_uuids, uuid);
+    g_free (uuid);
+
+    if (exm_extension_row_is_selected (row) != selected)
+        exm_extension_row_set_selected (row, selected);
+}
+
+static void
+on_page_selection_changed (GSimpleAction    *action G_GNUC_UNUSED,
+                           GVariant         *param,
+                           ExmInstalledPage *self)
+{
+    const char *uuid;
+    gboolean selected;
+
+    g_variant_get (param, "(&sb)", &uuid, &selected);
+
+    if (selected)
+        g_hash_table_add (self->selected_uuids, g_strdup (uuid));
+    else
+        g_hash_table_remove (self->selected_uuids, uuid);
+
+    // Keep the row for this extension in the other list in sync
+    foreach_extension_row (self->user_prefs_group, sync_row_selected, self);
+    foreach_extension_row (self->search_prefs_group, sync_row_selected, self);
+
+    update_n_selected (self);
+}
+
 void
 exm_installed_page_uninstall_selected (ExmInstalledPage *self)
 {
-    GHashTable *uuids_to_remove;
     GHashTableIter iter;
     gpointer key;
-    AdwPreferencesGroup *groups[] = {
-        self->user_prefs_group,
-        self->search_prefs_group,
-    };
 
     g_return_if_fail (EXM_IS_INSTALLED_PAGE (self));
 
-    uuids_to_remove = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-
-    for (guint g = 0; g < G_N_ELEMENTS (groups); g++)
-    {
-        guint i = 0;
-        ExmExtensionRow *row;
-        while ((row = EXM_EXTENSION_ROW (adw_preferences_group_get_row (groups[g], i++))) != NULL)
-        {
-            ExmExtension *ext;
-            gchar *uuid;
-
-            if (!exm_extension_row_is_selected (row))
-                continue;
-
-            ext = NULL;
-            g_object_get (row, "extension", &ext, NULL);
-            if (!ext) continue;
-
-            uuid = NULL;
-            g_object_get (ext, "uuid", &uuid, NULL);
-            g_object_unref (ext);
-
-            if (uuid)
-                g_hash_table_add (uuids_to_remove, uuid);
-        }
-    }
-
-    g_hash_table_iter_init (&iter, uuids_to_remove);
+    g_hash_table_iter_init (&iter, self->selected_uuids);
     while (g_hash_table_iter_next (&iter, &key, NULL))
     {
         ExmExtension *ext = exm_manager_get_by_uuid (self->manager, (const char *) key);
         if (ext)
+        {
             exm_manager_remove_extension (self->manager, ext);
+            g_object_unref (ext);
+        }
     }
+}
 
-    g_hash_table_destroy (uuids_to_remove);
+static void
+check_for_updates_if_supported (ExmInstalledPage *self)
+{
+    gboolean is_supported = FALSE;
+
+    g_object_get (self->manager, "is-supported", &is_supported, NULL);
+
+    if (is_supported)
+        exm_manager_check_for_updates (self->manager);
 }
 
 static void
@@ -592,6 +646,10 @@ on_bind_manager (ExmInstalledPage *self)
 {
     // Bind (or rebind) models
     invalidate_model_bindings (self);
+
+    g_signal_connect_object (self->manager, "notify::extensions",
+                             G_CALLBACK (invalidate_model_bindings), self,
+                             G_CONNECT_SWAPPED);
 
     g_signal_connect (self->manager,
                       "updates-available",
@@ -609,11 +667,11 @@ on_bind_manager (ExmInstalledPage *self)
     // Check if updates are available
     // NOTE: We need to do this *after* connecting the signal
     // handler above, otherwise we will not be notified.
-    gboolean is_supported;
-    g_object_get (self->manager, "is-supported", &is_supported, NULL);
+    g_signal_connect_object (self->manager, "notify::is-supported",
+                             G_CALLBACK (check_for_updates_if_supported), self,
+                             G_CONNECT_SWAPPED);
 
-    if (is_supported)
-        exm_manager_check_for_updates (self->manager);
+    check_for_updates_if_supported (self);
 }
 
 static void
@@ -695,6 +753,8 @@ exm_installed_page_init (ExmInstalledPage *self)
 
     gtk_widget_init_template (GTK_WIDGET (self));
 
+    self->selected_uuids = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
     settings = g_settings_new (APP_ID);
 
     g_settings_bind (settings, "sort-enabled-first",
@@ -704,11 +764,16 @@ exm_installed_page_init (ExmInstalledPage *self)
     g_object_unref (settings);
 
     action_group = g_simple_action_group_new ();
-    action = g_simple_action_new ("selection-changed", NULL);
+    action = g_simple_action_new ("selection-changed", G_VARIANT_TYPE ("(sb)"));
     g_signal_connect (action, "activate",
                       G_CALLBACK (on_page_selection_changed), self);
     g_action_map_add_action (G_ACTION_MAP (action_group), G_ACTION (action));
     gtk_widget_insert_action_group (GTK_WIDGET (self), "page",
                                     G_ACTION_GROUP (action_group));
     g_object_unref (action_group);
+
+    g_signal_connect (self,
+                      "notify::search-query",
+                      G_CALLBACK (on_search_changed),
+                      NULL);
 }

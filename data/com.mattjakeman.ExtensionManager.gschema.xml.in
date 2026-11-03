@@ -29,5 +29,10 @@
       <summary>Extension Repository Key</summary>
       <description>The Ed25519 public key (base64 of the raw 32 bytes) that signs the extension repository's index.</description>
     </key>
+    <key name="show-unsupported" type="b">
+      <default>false</default>
+      <summary>Show Unsupported</summary>
+      <description>Show extensions which do not support the current version of GNOME.</description>
+    </key>
   </schema>
 </schemalist>

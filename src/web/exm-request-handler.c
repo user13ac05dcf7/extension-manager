@@ -79,13 +79,25 @@ exm_request_handler_new (void)
     return g_object_new (EXM_TYPE_REQUEST_HANDLER, NULL);
 }
 
+SoupSession *
+exm_request_handler_get_shared_session (void)
+{
+    static SoupSession *shared = NULL;
+
+    if (g_once_init_enter (&shared))
+    {
+        SoupSession *session = soup_session_new_with_options ("timeout", 30, NULL);
+        g_once_init_leave (&shared, session);
+    }
+
+    return shared;
+}
+
 static void
 exm_request_handler_finalize (GObject *object)
 {
-    ExmRequestHandler *self = (ExmRequestHandler *)object;
-    ExmRequestHandlerPrivate *priv = exm_request_handler_get_instance_private (self);
+    ExmRequestHandlerPrivate *priv = exm_request_handler_get_instance_private ((ExmRequestHandler *)object);
 
-    g_object_unref (priv->session);
     g_hash_table_unref (priv->cache);
 
     G_OBJECT_CLASS (exm_request_handler_parent_class)->finalize (object);
@@ -119,7 +131,7 @@ return_response (GTask                  *task,
     if (result == NULL)
         g_task_return_error (task, error);
     else
-        g_task_return_pointer (task, result, g_object_unref);
+        g_task_return_pointer (task, result, klass->free_result);
 }
 
 static void
@@ -248,6 +260,7 @@ exm_request_handler_request_async (ExmRequestHandler   *self,
     {
         g_task_return_new_error (task, g_quark_from_string ("exm-search-provider"), -1,
                                  "Could not construct message for uri: %s", url_endpoint);
+        g_object_unref (task);
         return;
     }
 
@@ -264,6 +277,7 @@ exm_request_handler_request_async (ExmRequestHandler   *self,
                                       data);
 
     g_object_unref (msg);
+    g_object_unref (task);
 }
 
 gpointer
@@ -286,13 +300,14 @@ exm_request_handler_class_init (ExmRequestHandlerClass *klass)
     ExmRequestHandlerClass *request_handler_class = EXM_REQUEST_HANDLER_CLASS (klass);
 
     request_handler_class->handle_response = default_handle_response;
+    request_handler_class->free_result = g_object_unref;
 }
 
 static void
 exm_request_handler_init (ExmRequestHandler *self)
 {
     ExmRequestHandlerPrivate *priv = exm_request_handler_get_instance_private (self);
-    priv->session = soup_session_new_with_options ("timeout", 30, NULL);
+    priv->session = exm_request_handler_get_shared_session ();
     priv->cache = g_hash_table_new_full (g_str_hash, g_str_equal,
                                          g_free, (GDestroyNotify) cache_entry_free);
 }
