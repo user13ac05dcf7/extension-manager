@@ -7,13 +7,20 @@
 }
 
 .tint {
-  /* Dark view_bg_color */
   background-color: rgb(30 30 30);
   color: white;
 }
 
 .search-row {
   padding: 2px;
+}
+
+.browse-content {
+  border-spacing: 12px;
+}
+
+.browse-content > .linked {
+  border-spacing: 0;
 }
 
 .version-label {
@@ -28,7 +35,7 @@
 }
 
 .update {
-  color: #ff7800;
+  color: var(--warning-color);
 }
 
 comment-tile {
@@ -57,6 +64,6 @@ rating {
 }
 
 progressbar text {
-  font-size: 14px;
+  font-size: 0.875em;
   font-weight: bold;
 }

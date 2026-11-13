@@ -110,6 +110,10 @@ template $ExmDetailView: Adw.NavigationPage {
                         halign: center;
                         valign: center;
                         pixel-size: 64;
+
+                        accessibility {
+                          label: _("Extension Icon");
+                        }
                       }
 
                       Gtk.Box header_suffix {
@@ -141,15 +145,10 @@ template $ExmDetailView: Adw.NavigationPage {
 
                           Gtk.Label ext_author {
                             styles [
-                              "author-link",
+                              "dimmed",
                             ]
 
-                            use-markup: true;
-                            label: bind $format_author_link(
-                              template.data as <$ExmUnifiedData>.creator,
-                              template.data as <$ExmUnifiedData>.creator-username
-                              ) as <string>;
-                            activate-link => $on_author_link_activated();
+                            label: bind template.data as <$ExmUnifiedData>.creator;
                             xalign: 0;
                             ellipsize: end;
                             selectable: true;
@@ -238,6 +237,10 @@ template $ExmDetailView: Adw.NavigationPage {
 
                       $ExmScreenshot ext_screenshot {
                         focusable: true;
+
+                        accessibility {
+                          label: _("Extension Screenshot");
+                        }
                       }
                     }
 

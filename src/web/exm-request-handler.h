@@ -23,6 +23,7 @@
 
 #include <glib-object.h>
 #include <gio/gio.h>
+#include <libsoup/soup.h>
 
 G_BEGIN_DECLS
 
@@ -38,9 +39,15 @@ struct _ExmRequestHandlerClass
     ResponseHandler handle_response;
 
     guint cache_ttl_seconds;
+
+    // Frees a result that is never propagated, e.g. when cancelled.
+    // Defaults to g_object_unref().
+    GDestroyNotify free_result;
 };
 
 ExmRequestHandler *exm_request_handler_new (void);
+
+SoupSession *exm_request_handler_get_shared_session (void);
 
 void
 exm_request_handler_request_async (ExmRequestHandler   *self,

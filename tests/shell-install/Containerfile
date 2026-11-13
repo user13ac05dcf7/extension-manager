@@ -1,0 +1,11 @@
+FROM registry.fedoraproject.org/fedora:45
+RUN dnf -y --enablerepo=updates-testing --setopt=install_weak_deps=False install \
+        gnome-shell gjs mesa-dri-drivers mesa-libEGL dbus-daemon dbus-tools glib2 \
+        gnome-backgrounds python3 openssl unzip \
+        meson ninja-build gcc blueprint-compiler gtk4-devel libadwaita-devel json-glib-devel \
+        libsoup3-devel libxml2-devel glycin-devel glycin-gtk4-devel gnutls-devel libarchive-devel \
+        desktop-file-utils appstream gettext glib2-devel itstool \
+    && dnf clean all && useradd --create-home --uid 1000 tester
+USER tester
+ENV HOME=/home/tester USER=tester XDG_RUNTIME_DIR=/tmp/tester-runtime \
+    LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe NO_AT_BRIDGE=1 GTK_A11Y=none
